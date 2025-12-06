@@ -58,8 +58,13 @@ except Exception as e:
 security = HTTPBearer()
 
 @app.get("/")
+@app.head("/")
 async def root():
     return {"message": "WideChat API is running", "status": "healthy"}
+
+@app.get("/favicon.ico")
+async def favicon():
+    return {"message": "No favicon"}
 
 @app.get("/health")
 async def health_check():
@@ -74,11 +79,16 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 
 # AUTH ROUTES
 @app.post("/auth/createUser")
-async def create_user(user_data: CreateUserRequest, uid: str = Depends(verify_token)):
+async def create_user(user_data: CreateUserRequest):
     try:
-        # User is already created by Firebase Auth on frontend
-        # Just create/update user document in Firestore
-        db.collection('users').document(uid).set({
+        # Create user in Firebase Auth first
+        user = auth.create_user(
+            email=user_data.email,
+            password=user_data.password
+        )
+        
+        # Create user document in Firestore
+        db.collection('users').document(user.uid).set({
             'username': user_data.username,
             'email': user_data.email,
             'profilePic': '',
@@ -88,7 +98,7 @@ async def create_user(user_data: CreateUserRequest, uid: str = Depends(verify_to
             'createdAt': datetime.now()
         })
         
-        return {"success": True, "uid": uid}
+        return {"success": True, "uid": user.uid}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
