@@ -74,16 +74,11 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 
 # AUTH ROUTES
 @app.post("/auth/createUser")
-async def create_user(user_data: CreateUserRequest):
+async def create_user(user_data: CreateUserRequest, uid: str = Depends(verify_token)):
     try:
-        user = auth.create_user(
-            email=user_data.email,
-            password=user_data.password,
-            display_name=user_data.username
-        )
-        
-        # Create user document
-        db.collection('users').document(user.uid).set({
+        # User is already created by Firebase Auth on frontend
+        # Just create/update user document in Firestore
+        db.collection('users').document(uid).set({
             'username': user_data.username,
             'email': user_data.email,
             'profilePic': '',
@@ -93,7 +88,7 @@ async def create_user(user_data: CreateUserRequest):
             'createdAt': datetime.now()
         })
         
-        return {"success": True, "uid": user.uid}
+        return {"success": True, "uid": uid}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
