@@ -1,189 +1,314 @@
-# WideChat
+# WideChat - Modern WhatsApp-Style Chat Application
 
-A modern WhatsApp-like chat application built with Flutter and Firebase.
+A complete chat application built with Python FastAPI backend and Flutter frontend, featuring real-time messaging, file sharing, groups, and status updates.
 
-## Features
+## 🚀 Features
 
-- **Authentication**: Email/password and Google Sign-In
-- **Real-time Chat**: 1-on-1 and group messaging
-- **Media Sharing**: Images, files, and documents via custom backend
-- **User Search**: Find users by username
-- **Modern UI**: Clean design with purple/blue theme
-- **Cross-platform**: Android (iOS ready)
+### Authentication
+- ✅ Email signup/login
+- ✅ Google Sign-In
+- ✅ Username setup
+- ✅ User search by username
+- ✅ Online/offline status
 
-## Tech Stack
+### Chat System
+- ✅ 1-on-1 Chat
+- ✅ Real-time messages (Firestore Streams)
+- ✅ Typing indicators
+- ✅ Last seen status
+- ✅ Message read receipts (✓ and ✓✓)
+- ✅ Send text, images, videos, documents, audio
+- ✅ Voice recording
+- ✅ Delete message (for me/everyone)
+- ✅ Edit messages
+- ✅ Push notifications
 
-- **Frontend**: Flutter 3.x with Riverpod state management
-- **Backend**: Firebase (Auth, Firestore) + Custom FastAPI for media
-- **Storage**: Google Drive via service account
-- **Navigation**: go_router
+### Groups
+- ✅ Create groups
+- ✅ Add/remove members
+- ✅ Group name & icon
+- ✅ Group messages
+- ✅ Group typing indicators
+- ✅ Group read receipts
 
-## Project Structure
+### Status Feature
+- ✅ Upload image/video/text status
+- ✅ View others' status
+- ✅ 24-hour expiry
+
+### Settings & Profile
+- ✅ Profile picture
+- ✅ Username & bio
+- ✅ Privacy settings
+- ✅ Notifications
+- ✅ Logout
+
+## 🛠 Tech Stack
+
+### Backend
+- **Python** with **FastAPI**
+- **Uvicorn** server
+- **Firebase Admin SDK** (Firestore)
+- **Google Drive API** for file storage
+- **Pydantic** for data validation
+
+### Frontend
+- **Flutter** with **Riverpod** state management
+- **Firebase Auth** & **Firestore**
+- **Firebase Messaging** for push notifications
+- **Clean Architecture** (domain → data → presentation)
+- **Modern gradient UI** with glassmorphism
+
+## 📁 Project Structure
 
 ```
-lib/
-├── core/
-│   ├── router/          # App routing configuration
-│   └── theme/           # App theme and styling
-├── data/
-│   ├── models/          # Data models (User, Chat, Message)
-│   ├── repositories/    # Data repositories
-│   └── services/        # Firebase and API services
-└── presentation/
-    ├── providers/       # Riverpod providers
-    ├── screens/         # App screens
-    └── widgets/         # Reusable widgets
+WideChat/
+├── backend/
+│   ├── main.py              # FastAPI app entry point
+│   ├── models.py            # Pydantic models
+│   ├── config.py            # Configuration settings
+│   ├── requirements.txt     # Python dependencies
+│   ├── render.yaml          # Render deployment config
+│   └── .env.example         # Environment variables template
+└── flutter_app/
+    ├── lib/
+    │   ├── core/            # Core utilities, theme, router
+    │   ├── data/            # Data layer
+    │   ├── domain/          # Domain layer
+    │   ├── presentation/    # UI screens
+    │   ├── services/        # Business logic services
+    │   └── widgets/         # Reusable UI components
+    └── pubspec.yaml         # Flutter dependencies
 ```
 
-## Setup Instructions
+## 🔧 Setup Instructions
 
-### 1. Firebase Setup
+### Backend Setup
 
-1. Create a new Firebase project
-2. Enable Authentication (Email/Password and Google)
-3. Create Firestore database
-4. Add Android app to Firebase project
-5. Download `google-services.json` to `android/app/`
-6. Deploy Firestore security rules from `firestore.rules`
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd WideChat/backend
+   ```
 
-### 2. Backend API Setup
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Create a FastAPI backend with the following endpoint:
+3. **Set up environment variables**
+   ```bash
+   cp .env.example .env
+   ```
+   
+   Fill in your credentials:
+   - `FIREBASE_CREDENTIALS`: Firebase Admin SDK JSON (as string)
+   - `GOOGLE_DRIVE_CREDENTIALS`: Google Drive API credentials JSON
 
-```python
-@app.post("/upload")
-async def upload_file(
-    file: UploadFile,
-    authorization: str = Header(...)
-):
-    # Verify Firebase ID token
-    # Upload to Google Drive
-    # Return file metadata
-    return {
-        "file_id": "drive_file_id",
-        "download_url": "public_url",
-        "filename": "original_name",
-        "mime_type": "file_type",
-        "size": file_size
-    }
-```
 
-### 3. Flutter Setup
+4. **Run locally**
+   ```bash
+   uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   ```
 
-1. Install Flutter dependencies:
+### Frontend Setup
+
+1. **Navigate to Flutter app**
+   ```bash
+   cd ../flutter_app
+   ```
+
+2. **Install dependencies**
    ```bash
    flutter pub get
    ```
 
-2. Update `lib/data/services/media_service.dart` with your backend URL
+3. **Configure Firebase**
+   - Add your `google-services.json` (Android) and `GoogleService-Info.plist` (iOS)
+   - Update `ApiConstants.baseUrl` in `lib/core/constants/api_constants.dart`
 
-3. Run the app:
+4. **Run the app**
    ```bash
    flutter run
    ```
 
-## Key Features Implementation
+## 🚀 Deployment
 
-### Authentication Flow
-- Splash screen checks auth state
-- Login/signup with validation
-- Profile setup with unique username
-- Auto-navigation based on auth state
+### Backend Deployment on Render
 
-### Real-time Chat
-- Firestore streams for live updates
-- Message status indicators (sent/delivered/seen)
-- Typing indicators
-- Online/offline status
+1. **Create a new Web Service on Render**
+2. **Connect your GitHub repository**
+3. **Set environment variables:**
+   - `FIREBASE_CREDENTIALS`
+   - `GOOGLE_DRIVE_CREDENTIALS`
+   - `GOOGLE_DRIVE_FOLDER_ID`
+4. **Deploy automatically** (Render will use `render.yaml`)
 
-### Media Handling
-- Custom backend integration for file uploads
-- Google Drive storage via service account
-- Support for images, documents, and files
-- Progress indicators and error handling
+### Frontend Deployment
 
-### User Discovery
-- Username-based search
-- Profile display with chat initiation
-- Duplicate chat prevention
+1. **Build for production:**
+   ```bash
+   flutter build apk --release  # Android
+   flutter build ios --release  # iOS
+   ```
 
-## Firestore Data Structure
+2. **Update API endpoint** in `ApiConstants.baseUrl` to your Render URL
 
-### Users Collection
+## 🔐 Firebase Setup
+
+### Firestore Database Structure
+
+```
+users/
+  {uid}/
+    username: string
+    email: string
+    profilePic: string
+    about: string
+    lastSeen: timestamp
+    isOnline: boolean
+    createdAt: timestamp
+
+chats/
+  {chatId}/
+    participants: array
+    lastMessage: string
+    lastMessageTime: timestamp
+    createdAt: timestamp
+    
+    messages/
+      {messageId}/
+        messageId: string
+        senderId: string
+        content: string
+        messageType: string
+        timestamp: timestamp
+        readBy: array
+        isEdited: boolean
+        isDeleted: boolean
+        fileUrl?: string
+        fileName?: string
+
+groups/
+  {groupId}/
+    groupId: string
+    name: string
+    description: string
+    groupIcon: string
+    adminId: string
+    members: array
+    createdAt: timestamp
+    lastMessage: string
+    lastMessageTime: timestamp
+
+status/
+  {uid}/
+    statuses/
+      {statusId}/
+        statusId: string
+        content: string
+        mediaUrl: string
+        mediaType: string
+        timestamp: timestamp
+        expiresAt: timestamp
+```
+
+### Security Rules
+
 ```javascript
-users/{uid} {
-  uid: string,
-  email: string,
-  displayName: string,
-  username: string,
-  about?: string,
-  photoUrl?: string,
-  isOnline: boolean,
-  lastSeen: timestamp,
-  fcmToken?: string,
-  createdAt: timestamp
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users can read/write their own data
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Chat participants can read/write messages
+    match /chats/{chatId} {
+      allow read, write: if request.auth != null && 
+        request.auth.uid in resource.data.participants;
+      
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null && 
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+      }
+    }
+    
+    // Group members can read/write
+    match /groups/{groupId} {
+      allow read, write: if request.auth != null && 
+        request.auth.uid in resource.data.members;
+    }
+    
+    // Status visibility
+    match /status/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
 }
 ```
 
-### Chats Collection
-```javascript
-chats/{chatId} {
-  isGroup: boolean,
-  members: string[],
-  createdAt: timestamp,
-  lastMessage?: string,
-  lastMessageType?: string,
-  lastMessageSenderId?: string,
-  lastMessageTime?: timestamp,
-  // Group-specific fields
-  groupName?: string,
-  groupPhotoUrl?: string,
-  adminIds?: string[]
-}
-```
+## 🔧 Troubleshooting
 
-### Messages Subcollection
-```javascript
-chats/{chatId}/messages/{messageId} {
-  from: string,
-  to?: string,
-  text?: string,
-  type: "text" | "image" | "video" | "file" | "audio",
-  fileId?: string,
-  fileUrl?: string,
-  fileName?: string,
-  mimeType?: string,
-  sentAt: timestamp,
-  status: "sent" | "delivered" | "seen",
-  replyToMessageId?: string,
-  isEdited: boolean,
-  deletedForEveryone: boolean
-}
-```
+### Common Issues
 
-## Security Rules
+1. **Firebase connection issues**
+   - Verify `google-services.json` and `GoogleService-Info.plist` are correctly placed
+   - Check Firebase project configuration
 
-The app uses comprehensive Firestore security rules that:
-- Allow users to read/write only their own data
-- Restrict chat access to members only
-- Validate message creation permissions
-- Enable user search functionality
+2. **Backend API errors**
+   - Ensure environment variables are set correctly
+   - Verify Firebase Admin SDK credentials
+   - Check Google Drive API permissions
 
-## Building for Production
+3. **File upload failures**
+   - Verify Google Drive folder permissions
+   - Check file size limits
+   - Ensure proper API credentials
 
-1. Configure Firebase for production
-2. Set up proper signing for Android
-3. Update backend URL in MediaService
-4. Test all authentication flows
-5. Deploy Firestore rules
+4. **Push notifications not working**
+   - Verify Firebase Cloud Messaging setup
+   - Check device permissions
+   - Ensure FCM server key is configured
 
-## Future Enhancements
+### Development Tips
 
-- Voice messages
-- Video calls
-- Message reactions
-- Push notifications
-- Message encryption
-- Status/Stories feature
-- Dark mode toggle
-- Message search within chats
+1. **Hot reload** works for Flutter UI changes
+2. **Backend changes** require server restart
+3. **Use Firebase Emulator** for local development
+4. **Test on real devices** for push notifications
+5. **Monitor Firestore usage** to avoid quota limits
+
+## 📱 App Screenshots
+
+The app features a modern gradient UI with:
+- Glassmorphism cards
+- Smooth animations
+- Chat bubbles with gradients
+- Real-time status indicators
+- Clean navigation
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License.
+
+## 🆘 Support
+
+For support and questions:
+- Create an issue on GitHub
+- Check the troubleshooting section
+- Review Firebase and Flutter documentation
+
+---
+
+**WideChat** - Connect with friends worldwide! 🌍💬
