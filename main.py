@@ -28,13 +28,15 @@ app.add_middleware(
 )
 
 # Firebase Admin
-cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS)
+firebase_creds = json.loads(settings.FIREBASE_CREDENTIALS)
+cred = credentials.Certificate(firebase_creds)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Google Drive
-drive_creds = service_account.Credentials.from_service_account_file(
-    settings.GOOGLE_DRIVE_CREDENTIALS,
+drive_creds_dict = json.loads(settings.GOOGLE_DRIVE_CREDENTIALS)
+drive_creds = service_account.Credentials.from_service_account_info(
+    drive_creds_dict,
     scopes=['https://www.googleapis.com/auth/drive.file']
 )
 drive_service = build('drive', 'v3', credentials=drive_creds)
