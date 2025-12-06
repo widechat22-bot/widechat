@@ -28,18 +28,32 @@ app.add_middleware(
 )
 
 # Firebase Admin
-firebase_creds = json.loads(settings.FIREBASE_CREDENTIALS)
-cred = credentials.Certificate(firebase_creds)
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+try:
+    firebase_creds = json.loads(settings.FIREBASE_CREDENTIALS)
+    cred = credentials.Certificate(firebase_creds)
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+except json.JSONDecodeError as e:
+    print(f"Error parsing Firebase credentials: {e}")
+    raise
+except Exception as e:
+    print(f"Error initializing Firebase: {e}")
+    raise
 
 # Google Drive
-drive_creds_dict = json.loads(settings.GOOGLE_DRIVE_CREDENTIALS)
-drive_creds = service_account.Credentials.from_service_account_info(
-    drive_creds_dict,
-    scopes=['https://www.googleapis.com/auth/drive.file']
-)
-drive_service = build('drive', 'v3', credentials=drive_creds)
+try:
+    drive_creds_dict = json.loads(settings.GOOGLE_DRIVE_CREDENTIALS)
+    drive_creds = service_account.Credentials.from_service_account_info(
+        drive_creds_dict,
+        scopes=['https://www.googleapis.com/auth/drive.file']
+    )
+    drive_service = build('drive', 'v3', credentials=drive_creds)
+except json.JSONDecodeError as e:
+    print(f"Error parsing Google Drive credentials: {e}")
+    raise
+except Exception as e:
+    print(f"Error initializing Google Drive: {e}")
+    raise
 
 security = HTTPBearer()
 
