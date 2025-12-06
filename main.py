@@ -57,6 +57,14 @@ except Exception as e:
 
 security = HTTPBearer()
 
+@app.get("/")
+async def root():
+    return {"message": "WideChat API is running", "status": "healthy"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         decoded_token = auth.verify_id_token(credentials.credentials)
