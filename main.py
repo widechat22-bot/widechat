@@ -247,7 +247,8 @@ class FirebaseService:
 
     async def get_messages(self, user_id: str, other_user_id: str) -> List[dict]:
         messages_ref = self.db.collection('messages')
-        query = messages_ref.where('participants', 'array_contains_any', [user_id, other_user_id]).order_by('timestamp')
+        # Use simple query without ordering to avoid index requirement
+        query = messages_ref.where('participants', 'array_contains', user_id)
         docs = query.stream()
         
         messages = []
@@ -257,6 +258,8 @@ class FirebaseService:
                (msg_data.get('sender_id') == other_user_id and msg_data.get('receiver_id') == user_id):
                 messages.append({'id': doc.id, **msg_data})
         
+        # Sort by timestamp in Python
+        messages.sort(key=lambda x: x.get('timestamp', datetime.min))
         return messages
 
     async def search_messages(self, user_id: str, query: str) -> List[dict]:
@@ -272,6 +275,40 @@ class FirebaseService:
         return results
 
 # Create global instance
+def format_last_seen(last_seen_timestamp):
+    """Format last seen timestamp like WhatsApp"""
+    if not last_seen_timestamp:
+        return 'last seen a long time ago'
+    
+    try:
+        if hasattr(last_seen_timestamp, 'timestamp'):
+            last_seen = datetime.fromtimestamp(last_seen_timestamp.timestamp())
+        else:
+            last_seen = datetime.fromisoformat(str(last_seen_timestamp).replace('Z', '+00:00'))
+            if last_seen.tzinfo:
+                last_seen = last_seen.replace(tzinfo=None)
+        
+        now = datetime.now()
+        diff = now - last_seen
+        
+        if diff.total_seconds() < 60:
+            return 'last seen just now'
+        elif diff.total_seconds() < 3600:
+            minutes = int(diff.total_seconds() / 60)
+            return f'last seen {minutes} minute{"s" if minutes > 1 else ""} ago'
+        elif diff.days == 0:
+            return f'last seen today at {last_seen.strftime("%I:%M %p").lower()}'
+        elif diff.days == 1:
+            return f'last seen yesterday at {last_seen.strftime("%I:%M %p").lower()}'
+        elif diff.days < 7:
+            day_name = last_seen.strftime('%A')
+            return f'last seen {day_name} at {last_seen.strftime("%I:%M %p").lower()}'
+        else:
+            return f'last seen {last_seen.strftime("%d/%m/%Y at %I:%M %p").lower()}'
+    except Exception as e:
+        print(f"Error formatting last seen: {e}")
+        return 'last seen a long time ago'
+
 firebase_service = FirebaseService()
 
 async def update_user_status(user_id: str, is_online: bool):
@@ -298,24 +335,24 @@ class UserLogin(BaseModel):
     password: str
 
 class MessageSend(BaseModel):
-    receiver_id: int
+    receiver_id: str
     message_text: str
     message_type: str = "text"
-    reply_to_id: Optional[int] = None
+    reply_to_id: Optional[str] = None
     caption: Optional[str] = None
     file_url: Optional[str] = None
-    group_id: Optional[int] = None
+    group_id: Optional[str] = None
     location_lat: Optional[float] = None
     location_lng: Optional[float] = None
     contact_data: Optional[dict] = None
 
 class ChatRequest(BaseModel):
-    receiver_id: int
+    receiver_id: str
     message: str
 
 class BroadcastCreate(BaseModel):
     name: str
-    recipient_ids: List[int]
+    recipient_ids: List[str]
 
 class BroadcastMessage(BaseModel):
     message_text: str
@@ -323,14 +360,14 @@ class BroadcastMessage(BaseModel):
     file_url: Optional[str] = None
 
 class NotificationCreate(BaseModel):
-    user_id: int
+    user_id: str
     title: str
     message: str
     type: str = "message"
     data: Optional[dict] = None
 
 class MessageReaction(BaseModel):
-    message_id: int
+    message_id: str
     emoji: str
 
 class StatusUpdate(BaseModel):
@@ -340,7 +377,7 @@ class StatusUpdate(BaseModel):
 
 class GroupCreate(BaseModel):
     name: str
-    member_ids: List[int]
+    member_ids: List[str]
 
 # Background task to clean up inactive users
 async def cleanup_inactive_users():
@@ -368,6 +405,12 @@ async def cleanup_inactive_users():
                 online_users.pop(user_id, None)
                 user_sessions.pop(user_id, None)
                 await update_user_status(user_id, False)
+                
+                # Emit user offline status
+                await sio.emit('user_offline', {
+                    'user_id': user_id,
+                    'last_seen': get_indian_time().isoformat()
+                })
                 
         except Exception as e:
             print(f"Error in cleanup task: {e}")
@@ -678,22 +721,34 @@ async def get_connections(current_user = Depends(get_current_user)):
                     user_data = user_doc.to_dict()
                     user_data['id'] = user_doc.id
                     
-                    # Get last message
-                    messages_query = db.collection('messages').where('participants', 'array_contains_any', [current_user['id'], conn_id]).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(1)
+                    # Format last seen
+                    if user_data.get('is_online'):
+                        last_seen_formatted = 'online'
+                    else:
+                        last_seen_formatted = format_last_seen(user_data.get('last_seen'))
+                    
+                    # Get last message - simplified query without ordering to avoid index requirement
+                    messages_query = db.collection('messages').where('participants', 'array_contains', current_user['id'])
                     messages = messages_query.stream()
                     
                     last_message = None
+                    latest_timestamp = None
+                    
                     for msg in messages:
                         msg_data = msg.to_dict()
-                        if (msg_data.get('sender_id') == current_user['id'] and msg_data.get('receiver_id') == conn_id) or \
-                           (msg_data.get('sender_id') == conn_id and msg_data.get('receiver_id') == current_user['id']):
-                            last_message = {
-                                "text": msg_data['message_text'],
-                                "timestamp": msg_data['timestamp'],
-                                "type": msg_data['message_type'],
-                                "sender_id": msg_data['sender_id']
-                            }
-                            break
+                        # Check if this message is between current user and connection
+                        if ((msg_data.get('sender_id') == current_user['id'] and msg_data.get('receiver_id') == conn_id) or \
+                           (msg_data.get('sender_id') == conn_id and msg_data.get('receiver_id') == current_user['id'])):
+                            
+                            msg_timestamp = msg_data.get('timestamp')
+                            if msg_timestamp and (latest_timestamp is None or msg_timestamp > latest_timestamp):
+                                latest_timestamp = msg_timestamp
+                                last_message = {
+                                    "text": msg_data['message_text'],
+                                    "timestamp": msg_data['timestamp'],
+                                    "type": msg_data['message_type'],
+                                    "sender_id": msg_data['sender_id']
+                                }
                     
                     connected_users.append({
                         "id": user_data['id'],
@@ -701,6 +756,7 @@ async def get_connections(current_user = Depends(get_current_user)):
                         "email": user_data['email'],
                         "is_online": user_data.get('is_online', False),
                         "last_seen": user_data.get('last_seen'),
+                        "last_seen_formatted": last_seen_formatted,
                         "last_message": last_message
                     })
                 else:
@@ -793,7 +849,8 @@ async def send_chat_request(request_data: dict, current_user = Depends(get_curre
 # Chat routes
 @app.get("/chats/{user_id}")
 async def get_chats(user_id: str, current_user = Depends(get_current_user)):
-    messages_query = db.collection('messages').where('participants', 'array_contains_any', [current_user['id'], user_id]).order_by('timestamp')
+    # Use simple query without ordering to avoid index requirement
+    messages_query = db.collection('messages').where('participants', 'array_contains', current_user['id'])
     messages = messages_query.stream()
     
     user_chats = []
@@ -804,6 +861,8 @@ async def get_chats(user_id: str, current_user = Depends(get_current_user)):
             msg_data['id'] = msg.id
             user_chats.append(msg_data)
     
+    # Sort by timestamp in Python
+    user_chats.sort(key=lambda x: x.get('timestamp', datetime.min))
     return user_chats
 
 @app.post("/chats/send")
@@ -1028,7 +1087,8 @@ async def respond_to_call(response_data: dict, current_user = Depends(get_curren
 
 @app.get("/calls/history")
 async def get_call_history(current_user = Depends(get_current_user)):
-    calls_query = db.collection('calls').where('participants', 'array_contains', current_user['id']).order_by('started_at', direction=firestore.Query.DESCENDING)
+    # Use simple query without ordering to avoid index requirement
+    calls_query = db.collection('calls').where('participants', 'array_contains', current_user['id'])
     calls = calls_query.stream()
     
     user_calls = []
@@ -1037,6 +1097,8 @@ async def get_call_history(current_user = Depends(get_current_user)):
         call_data['id'] = call_doc.id
         user_calls.append(call_data)
     
+    # Sort by started_at in Python
+    user_calls.sort(key=lambda x: x.get('started_at', datetime.min), reverse=True)
     return user_calls
 
 # ==================== CHAT MANAGEMENT ====================
@@ -1090,8 +1152,8 @@ async def unarchive_chat(chat_id: str, current_user = Depends(get_current_user))
 
 @app.delete("/chats/{chat_id}/clear")
 async def clear_chat_history(chat_id: str, current_user = Depends(get_current_user)):
-    # Delete messages between current user and chat_id
-    messages_query = db.collection('messages').where('participants', 'array_contains_any', [current_user['id'], chat_id])
+    # Delete messages between current user and chat_id - use simple query
+    messages_query = db.collection('messages').where('participants', 'array_contains', current_user['id'])
     messages = messages_query.stream()
     
     for msg_doc in messages:
@@ -1313,7 +1375,8 @@ async def get_blocked_users(current_user = Depends(get_current_user)):
 # ==================== NOTIFICATIONS ====================
 @app.get("/notifications")
 async def get_notifications(current_user = Depends(get_current_user)):
-    notifications_query = db.collection('notifications').where('user_id', '==', current_user['id']).order_by('created_at', direction=firestore.Query.DESCENDING)
+    # Use simple query without ordering to avoid index requirement
+    notifications_query = db.collection('notifications').where('user_id', '==', current_user['id'])
     notifications = notifications_query.stream()
     
     user_notifications = []
@@ -1322,6 +1385,8 @@ async def get_notifications(current_user = Depends(get_current_user)):
         notification_data['id'] = notification_doc.id
         user_notifications.append(notification_data)
     
+    # Sort by created_at in Python
+    user_notifications.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
     return user_notifications
 
 @app.put("/notifications/{notification_id}/read")
@@ -1545,6 +1610,12 @@ async def disconnect(sid):
         online_users.pop(user_id, None)
         user_sessions.pop(user_id, None)
         await update_user_status(user_id, False)
+        
+        # Emit user offline status to all connected users
+        await sio.emit('user_offline', {
+            'user_id': user_id,
+            'last_seen': get_indian_time().isoformat()
+        }, skip_sid=sid)
 
 @sio.event
 async def join_room(sid, data):
@@ -1558,6 +1629,12 @@ async def join_room(sid, data):
         }
         user_sessions[user_id] = {'sid': sid}
         await update_user_status(user_id, True)
+        
+        # Emit user online status to all connected users immediately
+        await sio.emit('user_online', {
+            'user_id': user_id,
+            'timestamp': get_indian_time().isoformat()
+        })
 
 @sio.event
 async def typing(sid, data):
