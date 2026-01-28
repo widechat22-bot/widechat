@@ -27,6 +27,9 @@ from firebase_admin import credentials, firestore, auth
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request as GoogleRequest
+import pickle
 import io
 
 import os
@@ -113,25 +116,23 @@ class FileUtils:
 import json
 try:
     # Try to load from environment variable (JSON string)
-    firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    print(f"Firebase config found: {bool(firebase_config)}")
+    firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     
-    if firebase_config and firebase_config.startswith('{'):
-        print("Loading Firebase from JSON string")
-        cred = credentials.Certificate(json.loads(firebase_config))
+    if firebase_config:
+        print("Loading Firebase from environment variable")
+        # Parse JSON string from environment variable
+        service_account_info = json.loads(firebase_config)
+        cred = credentials.Certificate(service_account_info)
     else:
-        print("Loading Firebase from file path")
-        # Fallback to file path
-        cred = credentials.Certificate(firebase_config or "./firebase-service-account.json")
+        print("No Firebase config found in environment variables")
+        raise Exception("FIREBASE_SERVICE_ACCOUNT_JSON environment variable not set")
+        
+except json.JSONDecodeError as e:
+    print(f"Invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
+    raise Exception("Invalid Firebase service account JSON")
 except Exception as e:
     print(f"Firebase initialization error: {e}")
-    # Fallback to file
-    try:
-        print("Trying fallback file path")
-        cred = credentials.Certificate("./firebase-service-account.json")
-    except Exception as e2:
-        print(f"Fallback also failed: {e2}")
-        raise e2
+    raise e
 
 print("Initializing Firebase app...")
 firebase_admin.initialize_app(cred)
@@ -142,51 +143,116 @@ print("Firebase initialized successfully")
 class GoogleDriveService:
     def __init__(self):
         self.service = None
+        self.SCOPES = ['https://www.googleapis.com/auth/drive']
         self._initialize_service()
     
     def _initialize_service(self):
         try:
-            firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if firebase_config and firebase_config.startswith('{'):
-                # JSON string from environment
-                creds = service_account.Credentials.from_service_account_info(
-                    json.loads(firebase_config), scopes=['https://www.googleapis.com/auth/drive']
-                )
-            else:
-                # File path
-                creds_file = firebase_config or "./firebase-service-account.json"
-                creds = service_account.Credentials.from_service_account_file(
-                    creds_file, scopes=['https://www.googleapis.com/auth/drive']
-                )
+            creds = None
+            # Check if token.pickle exists
+            if os.path.exists('token.pickle'):
+                with open('token.pickle', 'rb') as token:
+                    creds = pickle.load(token)
+            
+            # If no valid credentials, run OAuth flow
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(GoogleRequest())
+                else:
+                    # Check if credentials.json exists
+                    if os.path.exists('credentials.json'):
+                        flow = InstalledAppFlow.from_client_secrets_file(
+                            'credentials.json', self.SCOPES)
+                        creds = flow.run_local_server(port=0)
+                    else:
+                        print("credentials.json not found. Please create OAuth2 credentials.")
+                        return
+                
+                # Save credentials for next run
+                with open('token.pickle', 'wb') as token:
+                    pickle.dump(creds, token)
+            
             self.service = build('drive', 'v3', credentials=creds)
+            print("Google Drive OAuth2 service initialized successfully")
+            
         except Exception as e:
-            print(f"Google Drive initialization failed: {e}")
+            print(f"Google Drive OAuth2 initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            self.service = None
     
-    async def upload_file(self, file_content: bytes, filename: str, mime_type: str) -> str:
+    def create_user_folder(self, user_email: str) -> str:
+        """Create a folder for the user in Google Drive root"""
+        try:
+            folder_metadata = {
+                "name": user_email,
+                "mimeType": "application/vnd.google-apps.folder"
+            }
+            folder = self.service.files().create(
+                body=folder_metadata,
+                fields="id"
+            ).execute()
+            print(f"Created folder for user {user_email}: {folder['id']}")
+            return folder["id"]
+        except Exception as e:
+            print(f"Error creating user folder: {e}")
+            raise e
+    
+    def delete_user_folder(self, folder_id: str):
+        """Delete user folder and all files in it"""
+        try:
+            self.service.files().delete(fileId=folder_id).execute()
+            print(f"Deleted user folder: {folder_id}")
+        except Exception as e:
+            print(f"Error deleting user folder: {e}")
+            raise e
+    
+    async def upload_file(self, file_content: bytes, filename: str, mime_type: str, folder_id: str = None) -> str:
         if not self.service:
             raise Exception("Google Drive service not initialized")
         
-        file_metadata = {'name': filename}
-        
-        media = MediaIoBaseUpload(
-            io.BytesIO(file_content),
-            mimetype=mime_type,
-            resumable=True
-        )
-        
-        file = self.service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-        
-        # Make file publicly accessible
-        self.service.permissions().create(
-            fileId=file['id'],
-            body={'role': 'reader', 'type': 'anyone'}
-        ).execute()
-        
-        return f"https://drive.google.com/uc?id={file['id']}"
+        try:
+            print(f"Uploading file to Google Drive: {filename} ({len(file_content)} bytes)")
+            
+            file_metadata = {
+                'name': filename
+            }
+            
+            # If folder_id provided, upload to that folder
+            if folder_id:
+                file_metadata['parents'] = [folder_id]
+            
+            media = MediaIoBaseUpload(
+                io.BytesIO(file_content),
+                mimetype=mime_type,
+                resumable=False
+            )
+            
+            file = self.service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id,webViewLink,webContentLink'
+            ).execute()
+            
+            file_id = file['id']
+            print(f"File uploaded to Google Drive with ID: {file_id}")
+            
+            # Make file publicly accessible
+            try:
+                self.service.permissions().create(
+                    fileId=file_id,
+                    body={'role': 'reader', 'type': 'anyone'}
+                ).execute()
+                print(f"File permissions set to public for ID: {file_id}")
+            except Exception as perm_error:
+                print(f"Permission setting failed: {perm_error}")
+            
+            return f"https://drive.google.com/uc?id={file_id}"
+        except Exception as e:
+            print(f"Google Drive upload error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise e
 
 # Initialize Google Drive service
 google_drive_service = GoogleDriveService()
@@ -507,6 +573,7 @@ async def test_endpoint():
     return {
         "message": "Test endpoint working",
         "firebase_configured": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")),
+        "google_drive_service": google_drive_service.service is not None,
         "timestamp": get_indian_time().isoformat()
     }
 
@@ -561,20 +628,22 @@ async def debug_headers(request: Request):
         "authorization": request.headers.get("authorization", "Not found")
     }
 
-@app.get("/debug/auth-optional")
-async def debug_auth_optional(current_user = Depends(get_current_user_optional)):
-    """Debug endpoint with optional authentication"""
-    if current_user:
+@app.get("/debug/drive")
+async def debug_drive():
+    """Debug endpoint to test Google Drive service"""
+    try:
+        if not google_drive_service.service:
+            return {"status": "error", "message": "Google Drive service not initialized"}
+        
+        # Try to list files to test the service
+        results = google_drive_service.service.files().list(pageSize=1).execute()
         return {
-            "authenticated": True,
-            "user_id": current_user['id'],
-            "user_name": current_user['name']
+            "status": "success", 
+            "message": "Google Drive service is working",
+            "files_count": len(results.get('files', []))
         }
-    else:
-        return {
-            "authenticated": False,
-            "message": "No valid authentication token provided"
-        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 app.add_middleware(
     CORSMiddleware,
@@ -583,11 +652,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Mount static files (removed - using Google Drive)
-# upload_dir = os.getenv("UPLOAD_DIR", "uploads")
-# os.makedirs(upload_dir, exist_ok=True)
-# app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
 # Socket.IO
 sio = socketio.AsyncServer(
@@ -611,6 +675,13 @@ async def register(user_data: UserCreate):
             display_name=user_data.name
         )
         
+        # Create user folder in Google Drive
+        try:
+            folder_id = google_drive_service.create_user_folder(user_data.email)
+        except Exception as drive_error:
+            print(f"Failed to create Drive folder: {drive_error}")
+            folder_id = None
+        
         # Create user in Firestore
         user_doc = {
             "email": user_data.email,
@@ -619,7 +690,8 @@ async def register(user_data: UserCreate):
             "status_message": "Available",
             "is_online": True,
             "invite_code": secrets.token_urlsafe(12),
-            "connections": []
+            "connections": [],
+            "drive_folder_id": folder_id
         }
         
         db.collection('users').document(firebase_user.uid).set(user_doc)
@@ -1006,17 +1078,36 @@ async def get_statuses(current_user = Depends(get_current_user)):
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), current_user = Depends(get_current_user)):
     try:
+        print(f"Upload request from user: {current_user['id']}")
+        print(f"File: {file.filename}, Content-Type: {file.content_type}, Size: {file.size if hasattr(file, 'size') else 'unknown'}")
+        
+        # Validate file
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
         # Read file content
         content = await file.read()
+        print(f"File content read: {len(content)} bytes")
+        
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file")
         
         # Generate unique filename
         timestamp = datetime.utcnow().timestamp()
         filename = f"{timestamp}_{file.filename}"
         
-        # Upload to Google Drive
+        # Upload to user's Google Drive folder
+        print("Uploading to Google Drive...")
+        if not google_drive_service.service:
+            raise HTTPException(status_code=503, detail="Google Drive service not available")
+        
+        # Get user's drive folder ID
+        folder_id = current_user.get('drive_folder_id')
+        
         file_url = await google_drive_service.upload_file(
-            content, filename, file.content_type or 'application/octet-stream'
+            content, filename, file.content_type or 'application/octet-stream', folder_id
         )
+        print(f"Google Drive upload successful: {file_url}")
         
         # Determine file type
         file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
@@ -1034,7 +1125,12 @@ async def upload_file(file: UploadFile = File(...), current_user = Depends(get_c
             "filename": file.filename,
             "file_type": file_type
         }
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Upload error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 # Call routes
@@ -1506,6 +1602,14 @@ async def respond_to_chat_request(request_id: str, response_data: dict, current_
 async def delete_account(current_user = Depends(get_current_user)):
     """Delete user account"""
     try:
+        # Delete user's Google Drive folder
+        folder_id = current_user.get('drive_folder_id')
+        if folder_id:
+            try:
+                google_drive_service.delete_user_folder(folder_id)
+            except Exception as drive_error:
+                print(f"Failed to delete Drive folder: {drive_error}")
+        
         # Delete user from Firebase Auth
         auth.delete_user(current_user['id'])
         
