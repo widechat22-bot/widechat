@@ -1,117 +1,109 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
-# Auth Models
-class CreateUserRequest(BaseModel):
-    email: EmailStr
-    password: str
-    username: str
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-# User Models
-class UpdateProfileRequest(BaseModel):
-    username: Optional[str] = None
-    about: Optional[str] = None
-    profilePic: Optional[str] = None
-
-class UserStatusRequest(BaseModel):
-    isOnline: bool
-
-# Message Models
-class FileData(BaseModel):
-    file_id: str
-    download_url: str
-    file_name: str
-    mime_type: str
-    file_size: int
-    thumbnail_url: Optional[str] = None
-
-class SendMessageRequest(BaseModel):
-    chatId: Optional[str] = None
-    receiverId: Optional[str] = None
-    content: str
-    messageType: str = "text"  # text, image, video, audio, document
-    fileData: Optional[FileData] = None
-
-class DeleteMessageRequest(BaseModel):
-    chatId: str
-    messageId: str
-    deleteForEveryone: bool = False
-
-class EditMessageRequest(BaseModel):
-    chatId: str
-    messageId: str
-    newContent: str
-
-class MarkReadRequest(BaseModel):
-    chatId: str
-    messageId: str
-
-# Group Models
-class CreateGroupRequest(BaseModel):
-    name: str
-    description: Optional[str] = ""
-    memberIds: List[str]
-    groupIcon: Optional[str] = None
-
-class AddGroupMemberRequest(BaseModel):
-    groupId: str
-    userId: str
-
-# Status Models
-class UploadStatusRequest(BaseModel):
-    content: Optional[str] = ""
-    mediaUrl: Optional[str] = None
-    mediaType: str = "text"  # text, image, video
-
-# Response Models
-class UserResponse(BaseModel):
-    uid: str
-    username: str
+# User models
+class UserCreate(BaseModel):
     email: str
-    profilePic: str
-    about: str
-    isOnline: bool
-    lastSeen: datetime
-
-class MessageResponse(BaseModel):
-    messageId: str
-    senderId: str
-    content: str
-    messageType: str
-    timestamp: datetime
-    readBy: List[str]
-    isEdited: bool
-    isDeleted: bool
-    fileUrl: Optional[str] = None
-    fileName: Optional[str] = None
-
-class ChatResponse(BaseModel):
-    chatId: str
-    participants: List[str]
-    lastMessage: str
-    lastMessageTime: datetime
-    messages: List[MessageResponse]
-
-class GroupResponse(BaseModel):
-    groupId: str
+    password: str
     name: str
-    description: str
-    groupIcon: str
-    adminId: str
-    members: List[str]
-    createdAt: datetime
-    lastMessage: str
-    lastMessageTime: datetime
+    phone: Optional[str] = None
 
-class StatusResponse(BaseModel):
-    statusId: str
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class PhoneLogin(BaseModel):
+    phone: str
+    otp: str
+
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    status_message: Optional[str] = None
+    profile_image_url: Optional[str] = None
+
+class PrivacySettings(BaseModel):
+    profile_photo_visibility: str = "everyone"  # everyone, contacts, nobody
+    last_seen_visibility: str = "everyone"
+    status_visibility: str = "everyone"
+
+# Message models
+class MessageSend(BaseModel):
+    receiver_id: Optional[int] = None
+    group_id: Optional[int] = None
+    message_text: str
+    message_type: str = "text"  # text, image, video, audio, document, location, contact
+    reply_to_id: Optional[int] = None
+    caption: Optional[str] = None
+    file_url: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    contact_data: Optional[dict] = None
+
+class MessageReaction(BaseModel):
+    message_id: int
+    emoji: str
+
+class MessageEdit(BaseModel):
+    message_text: str
+
+# Group models
+class GroupCreate(BaseModel):
+    name: str
+    member_ids: List[int]
+    description: Optional[str] = None
+
+class GroupUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    group_image_url: Optional[str] = None
+
+class GroupMemberAction(BaseModel):
+    user_id: int
+    action: str  # add, remove, promote, demote
+
+# Status models
+class StatusUpdate(BaseModel):
     content: str
-    mediaUrl: str
-    mediaType: str
-    timestamp: datetime
-    expiresAt: datetime
+    media_url: Optional[str] = None
+    status_type: str = "text"  # text, image, video
+
+# Call models
+class CallInitiate(BaseModel):
+    receiver_id: Optional[int] = None
+    group_id: Optional[int] = None
+    call_type: str  # voice, video
+
+class CallResponse(BaseModel):
+    call_id: int
+    action: str  # accept, reject, end
+
+# Broadcast models
+class BroadcastCreate(BaseModel):
+    name: str
+    recipient_ids: List[int]
+
+class BroadcastMessage(BaseModel):
+    broadcast_id: int
+    message_text: str
+    message_type: str = "text"
+    file_url: Optional[str] = None
+
+# Security models
+class TwoFactorSetup(BaseModel):
+    password: str
+
+class TwoFactorVerify(BaseModel):
+    token: str
+
+class BlockUser(BaseModel):
+    user_id: int
+
+# Private messaging models
+class ChatRequest(BaseModel):
+    invite_code: str
+    message: Optional[str] = "Hi! I'd like to connect with you."
+
+class ChatRequestResponse(BaseModel):
+    request_id: int
+    action: str  # accept, reject
