@@ -1,31 +1,15 @@
-fastapi
-uvicorn[standard]
-
-# Socket.IO
-python-socketio[asyncio]
-
-# Firebase & Google
-firebase-admin
-google-api-python-client
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-
-# Pydantic / FastAPI extras
-pydantic[email]
-pydantic-settings
-python-multipart
-
-# Files & async
-aiofiles
-
-# QR codes & images
-qrcode[pil]
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+python-socketio==5.8.0
+aiofiles==23.2.1
 pillow
-
-# Timezones
-pytz
-
-# Env & crypto (very commonly used with Firebase / auth)
-python-dotenv
-cryptography
+qrcode==7.4.2
+pytz==2023.3
+firebase-admin==6.4.0
+python-dotenv==1.0.0
+pyotp==2.9.0
+cryptography==41.0.7
+google-api-python-client==2.108.0
+google-auth-httplib2==0.1.1
+google-auth-oauthlib==1.1.0
