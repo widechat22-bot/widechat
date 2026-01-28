@@ -10,4 +10,6 @@ pydantic-settings
 python-multipart
 python-socketio[asyncio]
 qrcode[pil]
+aiofiles
+
 
