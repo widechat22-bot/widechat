@@ -1,15 +1,31 @@
 fastapi
-uvicorn
+uvicorn[standard]
+
+# Socket.IO
+python-socketio[asyncio]
+
+# Firebase & Google
 firebase-admin
 google-api-python-client
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
+
+# Pydantic / FastAPI extras
 pydantic[email]
 pydantic-settings
 python-multipart
-python-socketio[asyncio]
-qrcode[pil]
+
+# Files & async
 aiofiles
 
+# QR codes & images
+qrcode[pil]
+pillow
 
+# Timezones
+pytz
+
+# Env & crypto (very commonly used with Firebase / auth)
+python-dotenv
+cryptography
