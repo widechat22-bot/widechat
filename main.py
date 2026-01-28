@@ -1,420 +1,1588 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import socketio
+from datetime import datetime, timedelta
+import secrets
+import qrcode
+from io import BytesIO
+import base64
+import os
+from typing import Optional, List
+import aiofiles
+import pytz
+import asyncio
+from contextlib import asynccontextmanager
+import pyotp
+from PIL import Image
+from cryptography.fernet import Fernet
+
+# Firebase imports
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from google.oauth2 import service_account
+
+# Google Drive imports
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-import os
-from datetime import datetime, timedelta
-import uuid
+from google.oauth2 import service_account
 import io
-from typing import Optional, List
+
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# ==================== UTILITY CLASSES ====================
+class SecurityUtils:
+    @staticmethod
+    def generate_secret_key():
+        return Fernet.generate_key()
+    
+    @staticmethod
+    def encrypt_message(message: str, key: bytes) -> str:
+        f = Fernet(key)
+        encrypted = f.encrypt(message.encode())
+        return base64.b64encode(encrypted).decode()
+    
+    @staticmethod
+    def decrypt_message(encrypted_message: str, key: bytes) -> str:
+        f = Fernet(key)
+        decoded = base64.b64decode(encrypted_message.encode())
+        decrypted = f.decrypt(decoded)
+        return decrypted.decode()
+
+class QRUtils:
+    @staticmethod
+    def generate_qr_code(data: str, filename: str) -> str:
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(data)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        filepath = f"uploads/qr_{filename}.png"
+        img.save(filepath)
+        return filepath
+
+class OTPUtils:
+    @staticmethod
+    def generate_secret():
+        return pyotp.random_base32()
+    
+    @staticmethod
+    def generate_otp(secret: str) -> str:
+        totp = pyotp.TOTP(secret)
+        return totp.now()
+    
+    @staticmethod
+    def verify_otp(secret: str, token: str) -> bool:
+        totp = pyotp.TOTP(secret)
+        return totp.verify(token)
+
+class FileUtils:
+    @staticmethod
+    def compress_image(file_path: str, quality: int = 85) -> str:
+        with Image.open(file_path) as img:
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            
+            max_size = (1920, 1080)
+            img.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            compressed_path = file_path.replace(".", "_compressed.")
+            img.save(compressed_path, "JPEG", quality=quality, optimize=True)
+            return compressed_path
+    
+    @staticmethod
+    def get_file_type(filename: str) -> str:
+        ext = filename.lower().split('.')[-1]
+        if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+            return 'image'
+        elif ext in ['mp4', 'avi', 'mov', 'wmv', 'flv']:
+            return 'video'
+        elif ext in ['mp3', 'wav', 'ogg', 'm4a']:
+            return 'audio'
+        elif ext in ['pdf', 'doc', 'docx', 'txt', 'rtf']:
+            return 'document'
+        else:
+            return 'file'
+
+# Initialize Firebase
 import json
-
-from models import *
-from config import settings
-
-app = FastAPI(title="WideChat API", version="1.0.0")
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Firebase Admin
 try:
-    firebase_creds = json.loads(settings.FIREBASE_CREDENTIALS)
-    cred = credentials.Certificate(firebase_creds)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-except json.JSONDecodeError as e:
-    print(f"Error parsing Firebase credentials: {e}")
-    raise
+    # Try to load from environment variable (JSON string)
+    firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    print(f"Firebase config found: {bool(firebase_config)}")
+    
+    if firebase_config and firebase_config.startswith('{'):
+        print("Loading Firebase from JSON string")
+        cred = credentials.Certificate(json.loads(firebase_config))
+    else:
+        print("Loading Firebase from file path")
+        # Fallback to file path
+        cred = credentials.Certificate(firebase_config or "./firebase-service-account.json")
 except Exception as e:
-    print(f"Error initializing Firebase: {e}")
-    raise
-
-# Google Drive
-try:
-    drive_creds_dict = json.loads(settings.GOOGLE_DRIVE_CREDENTIALS)
-    drive_creds = service_account.Credentials.from_service_account_info(
-        drive_creds_dict,
-        scopes=['https://www.googleapis.com/auth/drive.file']
-    )
-    drive_service = build('drive', 'v3', credentials=drive_creds)
-except json.JSONDecodeError as e:
-    print(f"Error parsing Google Drive credentials: {e}")
-    raise
-except Exception as e:
-    print(f"Error initializing Google Drive: {e}")
-    raise
-
-security = HTTPBearer()
-
-@app.get("/")
-@app.head("/")
-async def root():
-    return {"message": "WideChat API is running", "status": "healthy"}
-
-@app.get("/favicon.ico")
-async def favicon():
-    return {"message": "No favicon"}
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    print(f"Firebase initialization error: {e}")
+    # Fallback to file
     try:
-        decoded_token = auth.verify_id_token(credentials.credentials)
-        return decoded_token['uid']
-    except:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        print("Trying fallback file path")
+        cred = credentials.Certificate("./firebase-service-account.json")
+    except Exception as e2:
+        print(f"Fallback also failed: {e2}")
+        raise e2
 
-# AUTH ROUTES
-@app.post("/auth/createUser")
-async def create_user(user_data: CreateUserRequest):
-    try:
-        # Create user in Firebase Auth first
-        user = auth.create_user(
-            email=user_data.email,
-            password=user_data.password
-        )
-        
-        # Create user document in Firestore
-        db.collection('users').document(user.uid).set({
-            'username': user_data.username,
-            'email': user_data.email,
-            'profilePic': '',
-            'about': 'Hey there! I am using WideChat.',
-            'lastSeen': datetime.now(),
-            'isOnline': True,
-            'createdAt': datetime.now()
-        })
-        
-        return {"success": True, "uid": user.uid}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+print("Initializing Firebase app...")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+print("Firebase initialized successfully")
 
-@app.post("/auth/login")
-async def login(login_data: LoginRequest):
-    try:
-        return {"success": True, "message": "Login handled by Firebase client"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# USER ROUTES
-@app.put("/users/updateProfile")
-async def update_profile(profile_data: UpdateProfileRequest, uid: str = Depends(verify_token)):
-    try:
-        update_data = {}
-        if profile_data.username:
-            update_data['username'] = profile_data.username
-        if profile_data.about:
-            update_data['about'] = profile_data.about
-        if profile_data.profilePic:
-            update_data['profilePic'] = profile_data.profilePic
+# ==================== GOOGLE DRIVE SERVICE ====================
+class GoogleDriveService:
+    def __init__(self):
+        self.service = None
+        self._initialize_service()
+    
+    def _initialize_service(self):
+        try:
+            firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if firebase_config and firebase_config.startswith('{'):
+                # JSON string from environment
+                creds = service_account.Credentials.from_service_account_info(
+                    json.loads(firebase_config), scopes=['https://www.googleapis.com/auth/drive']
+                )
+            else:
+                # File path
+                creds_file = firebase_config or "./firebase-service-account.json"
+                creds = service_account.Credentials.from_service_account_file(
+                    creds_file, scopes=['https://www.googleapis.com/auth/drive']
+                )
+            self.service = build('drive', 'v3', credentials=creds)
+        except Exception as e:
+            print(f"Google Drive initialization failed: {e}")
+    
+    async def upload_file(self, file_content: bytes, filename: str, mime_type: str) -> str:
+        if not self.service:
+            raise Exception("Google Drive service not initialized")
         
-        db.collection('users').document(uid).update(update_data)
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/users/search")
-async def search_users(username: str, uid: str = Depends(verify_token)):
-    try:
-        users_ref = db.collection('users')
-        query = users_ref.where('username', '>=', username).where('username', '<=', username + '\uf8ff').limit(10)
-        users = query.stream()
-        
-        result = []
-        for user in users:
-            user_data = user.to_dict()
-            if user.id != uid:
-                result.append({
-                    'uid': user.id,
-                    'username': user_data.get('username'),
-                    'profilePic': user_data.get('profilePic', ''),
-                    'about': user_data.get('about', '')
-                })
-        
-        return {"users": result}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.put("/users/status")
-async def update_user_status(status_data: UserStatusRequest, uid: str = Depends(verify_token)):
-    try:
-        db.collection('users').document(uid).update({
-            'isOnline': status_data.isOnline,
-            'lastSeen': datetime.now()
-        })
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# FILE UPLOAD
-def get_or_create_user_folder(user_email: str):
-    try:
-        # Search for existing folder
-        query = f"name='{user_email}' and mimeType='application/vnd.google-apps.folder'"
-        results = drive_service.files().list(q=query, fields='files(id, name)').execute()
-        folders = results.get('files', [])
-        
-        if folders:
-            return folders[0]['id']
-        
-        # Create new folder
-        folder_metadata = {
-            'name': user_email,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
-        return folder.get('id')
-    except Exception as e:
-        raise Exception(f"Failed to create user folder: {e}")
-
-@app.post("/upload/file")
-async def upload_file(file: UploadFile = File(...), uid: str = Depends(verify_token)):
-    try:
-        # Get user email
-        user = auth.get_user(uid)
-        user_email = user.email
-        
-        # Get or create user folder
-        folder_id = get_or_create_user_folder(user_email)
-        
-        file_content = await file.read()
-        file_size = len(file_content)
-        file_extension = file.filename.split('.')[-1] if '.' in file.filename else ''
-        unique_filename = f"{uuid.uuid4()}.{file_extension}"
-        
-        file_metadata = {
-            'name': unique_filename,
-            'parents': [folder_id]
-        }
+        file_metadata = {'name': filename}
         
         media = MediaIoBaseUpload(
             io.BytesIO(file_content),
-            mimetype=file.content_type,
+            mimetype=mime_type,
             resumable=True
         )
         
-        uploaded_file = drive_service.files().create(
+        file = self.service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id'
         ).execute()
         
-        drive_service.permissions().create(
-            fileId=uploaded_file['id'],
+        # Make file publicly accessible
+        self.service.permissions().create(
+            fileId=file['id'],
             body={'role': 'reader', 'type': 'anyone'}
         ).execute()
         
-        file_id = uploaded_file['id']
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        thumbnail_url = f"https://drive.google.com/thumbnail?id={file_id}" if file.content_type.startswith('image/') else None
+        return f"https://drive.google.com/uc?id={file['id']}"
+
+# Initialize Google Drive service
+google_drive_service = GoogleDriveService()
+
+# ==================== FIREBASE SERVICE CLASS ====================
+class FirebaseService:
+    def __init__(self):
+        self.db = db
+
+    async def create_user(self, user_data: dict) -> dict:
+        user_ref = self.db.collection('users').document()
+        user_data['id'] = user_ref.id
+        user_data['created_at'] = datetime.utcnow()
+        user_data['updated_at'] = datetime.utcnow()
+        user_ref.set(user_data)
+        return user_data
+
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        users_ref = self.db.collection('users')
+        query = users_ref.where('email', '==', email).limit(1)
+        docs = query.stream()
+        for doc in docs:
+            return {'id': doc.id, **doc.to_dict()}
+        return None
+
+    async def get_user_by_id(self, user_id: str) -> Optional[dict]:
+        doc_ref = self.db.collection('users').document(user_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            return {'id': doc.id, **doc.to_dict()}
+        return None
+
+    async def update_user(self, user_id: str, update_data: dict) -> bool:
+        update_data['updated_at'] = datetime.utcnow()
+        doc_ref = self.db.collection('users').document(user_id)
+        doc_ref.update(update_data)
+        return True
+
+    async def get_user_connections(self, user_id: str) -> List[dict]:
+        user = await self.get_user_by_id(user_id)
+        if not user or 'connections' not in user:
+            return []
+        
+        connections = []
+        for conn_id in user['connections']:
+            conn_user = await self.get_user_by_id(conn_id)
+            if conn_user:
+                connections.append(conn_user)
+        return connections
+
+    async def send_message(self, message_data: dict) -> dict:
+        message_ref = self.db.collection('messages').document()
+        message_data['id'] = message_ref.id
+        message_data['timestamp'] = datetime.utcnow()
+        message_data['status'] = 'sent'
+        message_ref.set(message_data)
+        return message_data
+
+    async def get_messages(self, user_id: str, other_user_id: str) -> List[dict]:
+        messages_ref = self.db.collection('messages')
+        query = messages_ref.where('participants', 'array_contains_any', [user_id, other_user_id]).order_by('timestamp')
+        docs = query.stream()
+        
+        messages = []
+        for doc in docs:
+            msg_data = doc.to_dict()
+            if (msg_data.get('sender_id') == user_id and msg_data.get('receiver_id') == other_user_id) or \
+               (msg_data.get('sender_id') == other_user_id and msg_data.get('receiver_id') == user_id):
+                messages.append({'id': doc.id, **msg_data})
+        
+        return messages
+
+    async def search_messages(self, user_id: str, query: str) -> List[dict]:
+        messages_ref = self.db.collection('messages')
+        docs = messages_ref.where('participants', 'array_contains', user_id).stream()
+        
+        results = []
+        for doc in docs:
+            msg_data = doc.to_dict()
+            if query.lower() in msg_data.get('message_text', '').lower():
+                results.append({'id': doc.id, **msg_data})
+        
+        return results
+
+# Create global instance
+firebase_service = FirebaseService()
+
+async def update_user_status(user_id: str, is_online: bool):
+    """Update user online status in Firestore"""
+    try:
+        user_ref = db.collection('users').document(user_id)
+        update_data = {'is_online': is_online}
+        
+        if not is_online:
+            update_data['last_seen'] = firestore.SERVER_TIMESTAMP
+        
+        user_ref.update(update_data)
+    except Exception as e:
+        print(f"Error updating user status: {e}")
+
+# Pydantic models
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    name: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class MessageSend(BaseModel):
+    receiver_id: int
+    message_text: str
+    message_type: str = "text"
+    reply_to_id: Optional[int] = None
+    caption: Optional[str] = None
+    file_url: Optional[str] = None
+    group_id: Optional[int] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    contact_data: Optional[dict] = None
+
+class ChatRequest(BaseModel):
+    receiver_id: int
+    message: str
+
+class BroadcastCreate(BaseModel):
+    name: str
+    recipient_ids: List[int]
+
+class BroadcastMessage(BaseModel):
+    message_text: str
+    message_type: str = "text"
+    file_url: Optional[str] = None
+
+class NotificationCreate(BaseModel):
+    user_id: int
+    title: str
+    message: str
+    type: str = "message"
+    data: Optional[dict] = None
+
+class MessageReaction(BaseModel):
+    message_id: int
+    emoji: str
+
+class StatusUpdate(BaseModel):
+    content: str
+    media_url: Optional[str] = None
+    status_type: str = "text"
+
+class GroupCreate(BaseModel):
+    name: str
+    member_ids: List[int]
+
+# Background task to clean up inactive users
+async def cleanup_inactive_users():
+    """Background task to mark users offline if no heartbeat received"""
+    while True:
+        try:
+            current_time = get_indian_time()
+            inactive_users = []
+            
+            for user_id, session_data in online_users.items():
+                last_heartbeat = session_data.get('last_heartbeat')
+                if last_heartbeat:
+                    last_heartbeat_dt = datetime.fromisoformat(last_heartbeat.replace('Z', '+00:00'))
+                    if last_heartbeat_dt.tzinfo is None:
+                        last_heartbeat_dt = pytz.timezone('Asia/Kolkata').localize(last_heartbeat_dt)
+                    
+                    # Convert both to naive datetime for comparison
+                    current_naive = current_time.replace(tzinfo=None)
+                    last_heartbeat_naive = last_heartbeat_dt.replace(tzinfo=None)
+                    
+                    if (current_naive - last_heartbeat_naive).total_seconds() > 30:
+                        inactive_users.append(user_id)
+            
+            for user_id in inactive_users:
+                online_users.pop(user_id, None)
+                user_sessions.pop(user_id, None)
+                await update_user_status(user_id, False)
+                
+        except Exception as e:
+            print(f"Error in cleanup task: {e}")
+        
+        await asyncio.sleep(15)  # Check every 15 seconds
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    asyncio.create_task(cleanup_inactive_users())
+    yield
+    # Shutdown (if needed)
+
+# FastAPI app
+app = FastAPI(title="WideChat API", lifespan=lifespan)
+
+# Auth setup
+security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)
+
+def get_indian_time():
+    return datetime.now()
+
+async def get_current_user_optional(credentials: HTTPAuthorizationCredentials = Depends(security_optional)):
+    """Optional authentication - returns None if no valid token"""
+    try:
+        if not credentials or not credentials.credentials:
+            return None
+            
+        token = credentials.credentials
+        decoded_token = auth.verify_id_token(token, check_revoked=True)
+        user_id = decoded_token['uid']
+        
+        user_doc = db.collection('users').document(user_id).get()
+        if not user_doc.exists:
+            return None
+        
+        user_data = user_doc.to_dict()
+        user_data['id'] = user_doc.id
+        return user_data
+    except Exception as e:
+        print(f"Optional auth error: {str(e)}")
+        return None
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        if not credentials or not credentials.credentials:
+            print("No credentials provided")
+            raise HTTPException(status_code=401, detail="Authorization token required")
+            
+        token = credentials.credentials
+        print(f"Verifying token: {token[:20]}...")
+        
+        try:
+            decoded_token = auth.verify_id_token(token, check_revoked=True)
+            user_id = decoded_token['uid']
+            print(f"Token verified for user: {user_id}")
+        except auth.InvalidIdTokenError as e:
+            print(f"Invalid token error: {str(e)}")
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+        except auth.ExpiredIdTokenError as e:
+            print(f"Expired token error: {str(e)}")
+            raise HTTPException(status_code=401, detail="Authentication token expired")
+        except auth.RevokedIdTokenError as e:
+            print(f"Revoked token error: {str(e)}")
+            raise HTTPException(status_code=401, detail="Authentication token revoked")
+        except Exception as e:
+            print(f"Token verification error: {str(e)}")
+            raise HTTPException(status_code=401, detail="Token verification failed")
+        
+        user_doc = db.collection('users').document(user_id).get()
+        if not user_doc.exists:
+            print(f"User document not found for: {user_id}")
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_data = user_doc.to_dict()
+        user_data['id'] = user_doc.id
+        print(f"User data retrieved successfully for: {user_id}")
+        return user_data
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected auth error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Authentication system error")
+
+@app.get("/")
+async def root():
+    return {"message": "WideChat API is running", "status": "healthy", "timestamp": get_indian_time().isoformat()}
+
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint without authentication"""
+    return {
+        "message": "Test endpoint working",
+        "firebase_configured": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")),
+        "timestamp": get_indian_time().isoformat()
+    }
+
+@app.get("/health")
+async def health_check():
+    try:
+        # Test Firebase connection
+        test_doc = db.collection('test').document('health').get()
+        firebase_status = "connected"
+    except Exception as e:
+        firebase_status = f"error: {str(e)}"
+    
+    return {
+        "status": "ok", 
+        "service": "WideChat Backend",
+        "firebase": firebase_status,
+        "env_vars": {
+            "FIREBASE_SERVICE_ACCOUNT_JSON": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")),
+            "GOOGLE_APPLICATION_CREDENTIALS": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+        },
+        "auth_test": "Firebase auth initialized"
+    }
+
+@app.get("/debug/auth")
+async def debug_auth():
+    """Debug endpoint to test authentication"""
+    try:
+        # Test creating a test user
+        test_user = auth.create_user(
+            email="test@example.com",
+            password="testpass123"
+        )
+        auth.delete_user(test_user.uid)  # Clean up
+        return {"auth_status": "working", "message": "Firebase Auth is functional"}
+    except Exception as e:
+        return {"auth_status": "error", "error": str(e)}
+
+@app.get("/debug/token")
+async def debug_token(current_user = Depends(get_current_user)):
+    """Debug endpoint to test token validation"""
+    return {
+        "message": "Token is valid",
+        "user_id": current_user['id'],
+        "user_name": current_user['name']
+    }
+
+@app.get("/debug/headers")
+async def debug_headers(request: Request):
+    """Debug endpoint to check request headers"""
+    return {
+        "headers": dict(request.headers),
+        "authorization": request.headers.get("authorization", "Not found")
+    }
+
+@app.get("/debug/auth-optional")
+async def debug_auth_optional(current_user = Depends(get_current_user_optional)):
+    """Debug endpoint with optional authentication"""
+    if current_user:
+        return {
+            "authenticated": True,
+            "user_id": current_user['id'],
+            "user_name": current_user['name']
+        }
+    else:
+        return {
+            "authenticated": False,
+            "message": "No valid authentication token provided"
+        }
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://widechatapp.web.app", "https://widechatmessage.web.app", "https://widechat-q4g3.onrender.com", "http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount static files (removed - using Google Drive)
+# upload_dir = os.getenv("UPLOAD_DIR", "uploads")
+# os.makedirs(upload_dir, exist_ok=True)
+# app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
+
+# Socket.IO
+sio = socketio.AsyncServer(
+    cors_allowed_origins="*",
+    async_mode='asgi'
+)
+socket_app = socketio.ASGIApp(sio, app)
+
+# Online users tracking
+online_users = {}
+user_sessions = {}
+
+# Auth routes
+@app.post("/auth/register")
+async def register(user_data: UserCreate):
+    try:
+        # Create Firebase Auth user
+        firebase_user = auth.create_user(
+            email=user_data.email,
+            password=user_data.password,
+            display_name=user_data.name
+        )
+        
+        # Create user in Firestore
+        user_doc = {
+            "email": user_data.email,
+            "name": user_data.name,
+            "profile_image_url": None,
+            "status_message": "Available",
+            "is_online": True,
+            "invite_code": secrets.token_urlsafe(12),
+            "connections": []
+        }
+        
+        db.collection('users').document(firebase_user.uid).set(user_doc)
+        
+        # Generate custom token
+        custom_token = auth.create_custom_token(firebase_user.uid)
         
         return {
-            "success": True,
-            "file_id": file_id,
-            "download_url": download_url,
-            "file_name": file.filename,
-            "mime_type": file.content_type,
-            "file_size": file_size,
-            "thumbnail_url": thumbnail_url
+            "custom_token": custom_token.decode('utf-8'),
+            "user": {"id": firebase_user.uid, "name": user_data.name, "email": user_data.email}
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# MESSAGE ROUTES
-@app.post("/messages/send")
-async def send_message(message_data: SendMessageRequest, uid: str = Depends(verify_token)):
+@app.post("/auth/login")
+async def login(user_data: UserLogin):
     try:
-        chat_id = message_data.chatId
-        if not chat_id:
-            participants = sorted([uid, message_data.receiverId])
-            chat_id = f"{participants[0]}_{participants[1]}"
+        # Get user by email from Firestore
+        users_query = db.collection('users').where('email', '==', user_data.email).limit(1)
+        users = users_query.stream()
+        
+        user_doc = None
+        for user in users:
+            user_doc = user
+            break
+        
+        if not user_doc:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        user_data_dict = user_doc.to_dict()
+        user_data_dict['id'] = user_doc.id
+        
+        # Create custom token for the user
+        custom_token = auth.create_custom_token(user_doc.id)
+        
+        return {
+            "custom_token": custom_token.decode('utf-8'),
+            "user": {
+                "id": user_data_dict['id'],
+                "name": user_data_dict['name'],
+                "email": user_data_dict['email']
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Login error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+@app.get("/users/me")
+async def get_me(current_user = Depends(get_current_user)):
+    return {
+        "id": current_user['id'], 
+        "name": current_user['name'], 
+        "email": current_user['email'], 
+        "status_message": current_user['status_message'],
+        "profile_image_url": current_user['profile_image_url'],
+        "invite_code": current_user.get('invite_code', ''),
+        "connections_count": len(current_user.get('connections', []))
+    }
+
+@app.get("/users/qr")
+async def get_qr_code(current_user = Depends(get_current_user)):
+    """Generate QR code for user's invite code"""
+    invite_code = current_user.get('invite_code')
+    if not invite_code:
+        raise HTTPException(status_code=404, detail="Invite code not found")
+    
+    # Create QR code
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data(f"widechat://connect/{invite_code}")
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffer = BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+    
+    img_str = base64.b64encode(buffer.getvalue()).decode()
+    return {"qr_code": f"data:image/png;base64,{img_str}"}
+
+@app.get("/users/connections")
+async def get_connections(current_user = Depends(get_current_user)):
+    """Get user connections"""
+    try:
+        print(f"Getting connections for user: {current_user['id']}")
+        
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required")
             
-            db.collection('chats').document(chat_id).set({
-                'participants': participants,
-                'lastMessage': message_data.content,
-                'lastMessageTime': datetime.now(),
-                'createdAt': datetime.now()
-            })
+        connections = current_user.get('connections', [])
+        print(f"User has {len(connections)} connections")
         
-        message_id = str(uuid.uuid4())
-        message_doc = {
-            'messageId': message_id,
-            'senderId': uid,
-            'content': message_data.content,
-            'messageType': message_data.messageType,
-            'timestamp': datetime.now(),
-            'readBy': [uid],
-            'isEdited': False,
-            'isDeleted': False
+        connected_users = []
+        for conn_id in connections:
+            try:
+                user_doc = db.collection('users').document(conn_id).get()
+                if user_doc.exists:
+                    user_data = user_doc.to_dict()
+                    user_data['id'] = user_doc.id
+                    
+                    # Get last message
+                    messages_query = db.collection('messages').where('participants', 'array_contains_any', [current_user['id'], conn_id]).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(1)
+                    messages = messages_query.stream()
+                    
+                    last_message = None
+                    for msg in messages:
+                        msg_data = msg.to_dict()
+                        if (msg_data.get('sender_id') == current_user['id'] and msg_data.get('receiver_id') == conn_id) or \
+                           (msg_data.get('sender_id') == conn_id and msg_data.get('receiver_id') == current_user['id']):
+                            last_message = {
+                                "text": msg_data['message_text'],
+                                "timestamp": msg_data['timestamp'],
+                                "type": msg_data['message_type'],
+                                "sender_id": msg_data['sender_id']
+                            }
+                            break
+                    
+                    connected_users.append({
+                        "id": user_data['id'],
+                        "name": user_data['name'],
+                        "email": user_data['email'],
+                        "is_online": user_data.get('is_online', False),
+                        "last_seen": user_data.get('last_seen'),
+                        "last_message": last_message
+                    })
+                else:
+                    print(f"Connection user {conn_id} not found")
+            except Exception as conn_error:
+                print(f"Error processing connection {conn_id}: {str(conn_error)}")
+                continue
+        
+        print(f"Returning {len(connected_users)} connected users")
+        return connected_users
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in get_connections: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch connections")
+
+@app.put("/users/me")
+async def update_profile(profile_data: dict, current_user = Depends(get_current_user)):
+    """Update user profile"""
+    user_ref = db.collection('users').document(current_user['id'])
+    
+    update_data = {}
+    if 'name' in profile_data:
+        update_data['name'] = profile_data['name']
+    if 'status_message' in profile_data:
+        update_data['status_message'] = profile_data['status_message']
+    if 'profile_image_url' in profile_data:
+        update_data['profile_image_url'] = profile_data['profile_image_url']
+    
+    if update_data:
+        user_ref.update(update_data)
+    
+    return {"message": "Profile updated successfully"}
+
+@app.get("/users")
+async def get_users(current_user = Depends(get_current_user)):
+    """This endpoint is now deprecated - use /users/connections instead"""
+    return await get_connections(current_user)
+
+# Chat request system
+@app.post("/chat-requests/send")
+async def send_chat_request(request_data: dict, current_user = Depends(get_current_user)):
+    """Send a chat request using invite code"""
+    invite_code = request_data.get('invite_code')
+    message = request_data.get('message', "Hi! I'd like to connect with you.")
+    
+    # Find user by invite code
+    users_query = db.collection('users').where('invite_code', '==', invite_code).limit(1)
+    users = users_query.stream()
+    
+    target_user = None
+    for user_doc in users:
+        target_user = user_doc.to_dict()
+        target_user['id'] = user_doc.id
+        break
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Invalid invite code")
+    
+    if target_user['id'] == current_user['id']:
+        raise HTTPException(status_code=400, detail="Cannot send request to yourself")
+    
+    # Check if already connected
+    if current_user['id'] in target_user.get('connections', []):
+        raise HTTPException(status_code=400, detail="Already connected")
+    
+    # Create chat request
+    request_doc = {
+        "sender_id": current_user['id'],
+        "receiver_id": target_user['id'],
+        "message": message,
+        "status": "pending",
+        "created_at": firestore.SERVER_TIMESTAMP
+    }
+    
+    doc_ref = db.collection('chat_requests').add(request_doc)
+    request_id = doc_ref[1].id
+    
+    # Emit to target user
+    await sio.emit("chat_request", {
+        "id": request_id,
+        "sender": {"id": current_user['id'], "name": current_user['name']},
+        "message": message
+    }, room=f"user_{target_user['id']}")
+    
+    return {"message": "Chat request sent"}
+
+
+
+# Chat routes
+@app.get("/chats/{user_id}")
+async def get_chats(user_id: str, current_user = Depends(get_current_user)):
+    messages_query = db.collection('messages').where('participants', 'array_contains_any', [current_user['id'], user_id]).order_by('timestamp')
+    messages = messages_query.stream()
+    
+    user_chats = []
+    for msg in messages:
+        msg_data = msg.to_dict()
+        if (msg_data.get('sender_id') == current_user['id'] and msg_data.get('receiver_id') == user_id) or \
+           (msg_data.get('sender_id') == user_id and msg_data.get('receiver_id') == current_user['id']):
+            msg_data['id'] = msg.id
+            user_chats.append(msg_data)
+    
+    return user_chats
+
+@app.post("/chats/send")
+async def send_message(message_data: MessageSend, current_user = Depends(get_current_user)):
+    # Check if users are connected
+    receiver_doc = db.collection('users').document(message_data.receiver_id).get()
+    if not receiver_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    receiver_data = receiver_doc.to_dict()
+    if current_user['id'] not in receiver_data.get('connections', []):
+        raise HTTPException(status_code=403, detail="Not authorized to message this user")
+    
+    # Create message
+    message_doc = {
+        "sender_id": current_user['id'],
+        "receiver_id": message_data.receiver_id,
+        "message_text": message_data.message_text,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+        "status": "sent",
+        "message_type": message_data.message_type,
+        "file_url": message_data.file_url,
+        "participants": [current_user['id'], message_data.receiver_id],
+        "starred_by": [],
+        "forwarded": False,
+        "reply_to_id": message_data.reply_to_id,
+        "caption": message_data.caption,
+        "edited": False
+    }
+    
+    doc_ref = db.collection('messages').add(message_doc)
+    message_id = doc_ref[1].id
+    
+    # Emit to socket
+    await sio.emit("new_message", {
+        "id": message_id,
+        "sender_id": current_user['id'],
+        "receiver_id": message_data.receiver_id,
+        "message_text": message_data.message_text,
+        "timestamp": get_indian_time().isoformat(),
+        "message_type": message_data.message_type,
+        "file_url": message_data.file_url,
+        "caption": message_data.caption,
+        "sender_name": current_user['name']
+    }, room=f"user_{message_data.receiver_id}")
+    
+    return {"id": message_id, "message": "Message sent"}
+
+# Message reactions
+@app.post("/messages/{message_id}/react")
+async def react_to_message(message_id: str, reaction: MessageReaction, current_user = Depends(get_current_user)):
+    # Remove existing reaction from this user
+    reactions_query = db.collection('reactions').where('message_id', '==', message_id).where('user_id', '==', current_user['id'])
+    existing_reactions = reactions_query.stream()
+    for doc in existing_reactions:
+        doc.reference.delete()
+    
+    # Add new reaction
+    new_reaction = {
+        "message_id": message_id,
+        "user_id": current_user['id'],
+        "emoji": reaction.emoji,
+        "timestamp": firestore.SERVER_TIMESTAMP
+    }
+    db.collection('reactions').add(new_reaction)
+    
+    return {"message": "Reaction added"}
+
+# Message editing
+@app.put("/messages/{message_id}")
+async def edit_message(message_id: str, new_text: str, current_user = Depends(get_current_user)):
+    message_ref = db.collection('messages').document(message_id)
+    message_doc = message_ref.get()
+    
+    if message_doc.exists and message_doc.to_dict().get('sender_id') == current_user['id']:
+        message_ref.update({
+            'message_text': new_text,
+            'edited': True,
+            'edited_at': firestore.SERVER_TIMESTAMP
+        })
+        return {"message": "Message edited"}
+    
+    raise HTTPException(status_code=404, detail="Message not found or unauthorized")
+
+# Message deletion
+@app.delete("/messages/{message_id}")
+async def delete_message(message_id: str, current_user = Depends(get_current_user)):
+    message_ref = db.collection('messages').document(message_id)
+    message_doc = message_ref.get()
+    
+    if message_doc.exists and message_doc.to_dict().get('sender_id') == current_user['id']:
+        message_ref.delete()
+        return {"message": "Message deleted"}
+    
+    raise HTTPException(status_code=404, detail="Message not found or unauthorized")
+
+# Status updates
+@app.post("/status")
+async def create_status(status: StatusUpdate, current_user = Depends(get_current_user)):
+    new_status = {
+        "user_id": current_user['id'],
+        "content": status.content,
+        "media_url": status.media_url,
+        "status_type": status.status_type,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+        "expires_at": datetime.utcnow() + timedelta(hours=24),
+        "views": []
+    }
+    doc_ref = db.collection('statuses').add(new_status)
+    
+    return {"id": doc_ref[1].id, "message": "Status created"}
+
+@app.get("/status")
+async def get_statuses(current_user = Depends(get_current_user)):
+    # Get active statuses (not expired)
+    now = datetime.utcnow()
+    statuses_query = db.collection('statuses').where('expires_at', '>', now)
+    statuses = statuses_query.stream()
+    
+    # Group by user
+    user_statuses = {}
+    for status_doc in statuses:
+        status_data = status_doc.to_dict()
+        status_data['id'] = status_doc.id
+        
+        user_doc = db.collection('users').document(status_data['user_id']).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            user_id = status_data['user_id']
+            
+            if user_id not in user_statuses:
+                user_statuses[user_id] = {
+                    "user": {"id": user_id, "name": user_data['name']},
+                    "statuses": []
+                }
+            user_statuses[user_id]['statuses'].append(status_data)
+    
+    return list(user_statuses.values())
+
+# File upload
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...), current_user = Depends(get_current_user)):
+    try:
+        # Read file content
+        content = await file.read()
+        
+        # Generate unique filename
+        timestamp = datetime.utcnow().timestamp()
+        filename = f"{timestamp}_{file.filename}"
+        
+        # Upload to Google Drive
+        file_url = await google_drive_service.upload_file(
+            content, filename, file.content_type or 'application/octet-stream'
+        )
+        
+        # Determine file type
+        file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+        if file_extension in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']:
+            file_type = 'image'
+        elif file_extension in ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm']:
+            file_type = 'video'
+        elif file_extension in ['mp3', 'wav', 'ogg', 'm4a', 'aac']:
+            file_type = 'audio'
+        else:
+            file_type = 'file'
+        
+        return {
+            "file_url": file_url,
+            "filename": file.filename,
+            "file_type": file_type
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+# Call routes
+@app.post("/calls/initiate")
+async def initiate_call(call_data: dict, current_user = Depends(get_current_user)):
+    call = {
+        "caller_id": current_user['id'],
+        "receiver_id": call_data.get('receiver_id'),
+        "call_type": call_data.get('call_type', 'voice'),
+        "status": "ringing",
+        "started_at": firestore.SERVER_TIMESTAMP,
+        "participants": [current_user['id'], call_data.get('receiver_id')]
+    }
+    doc_ref = db.collection('calls').add(call)
+    call_id = doc_ref[1].id
+    
+    # Emit to receiver
+    call['id'] = call_id
+    await sio.emit("incoming_call", call, room=f"user_{call['receiver_id']}")
+    
+    return {"call_id": call_id, "status": "initiated"}
+
+@app.post("/calls/respond")
+async def respond_to_call(response_data: dict, current_user = Depends(get_current_user)):
+    call_id = response_data.get('call_id')
+    action = response_data.get('action')
+    
+    call_ref = db.collection('calls').document(call_id)
+    call_doc = call_ref.get()
+    
+    if call_doc.exists:
+        call_data = call_doc.to_dict()
+        update_data = {'status': action}
+        
+        if action == 'accept':
+            update_data['accepted_at'] = firestore.SERVER_TIMESTAMP
+        elif action == 'end':
+            update_data['ended_at'] = firestore.SERVER_TIMESTAMP
+        
+        call_ref.update(update_data)
+        
+        # Emit response to caller
+        target_user = call_data['caller_id'] if call_data['receiver_id'] == current_user['id'] else call_data['receiver_id']
+        await sio.emit('call_response', {
+            'call_id': call_id,
+            'action': action
+        }, room=f"user_{target_user}")
+    
+    return {"message": f"Call {action}"}
+
+@app.get("/calls/history")
+async def get_call_history(current_user = Depends(get_current_user)):
+    calls_query = db.collection('calls').where('participants', 'array_contains', current_user['id']).order_by('started_at', direction=firestore.Query.DESCENDING)
+    calls = calls_query.stream()
+    
+    user_calls = []
+    for call_doc in calls:
+        call_data = call_doc.to_dict()
+        call_data['id'] = call_doc.id
+        user_calls.append(call_data)
+    
+    return user_calls
+
+# ==================== CHAT MANAGEMENT ====================
+@app.post("/chats/{chat_id}/pin")
+async def pin_chat(chat_id: str, current_user = Depends(get_current_user)):
+    # Check if already pinned
+    pinned_query = db.collection('pinned_chats').where('user_id', '==', current_user['id']).where('chat_id', '==', chat_id)
+    existing = list(pinned_query.stream())
+    
+    if not existing:
+        pinned_chat = {
+            "user_id": current_user['id'],
+            "chat_id": chat_id,
+            "pinned_at": firestore.SERVER_TIMESTAMP
+        }
+        db.collection('pinned_chats').add(pinned_chat)
+    
+    return {"message": "Chat pinned"}
+
+@app.delete("/chats/{chat_id}/pin")
+async def unpin_chat(chat_id: str, current_user = Depends(get_current_user)):
+    pinned_query = db.collection('pinned_chats').where('user_id', '==', current_user['id']).where('chat_id', '==', chat_id)
+    docs = pinned_query.stream()
+    for doc in docs:
+        doc.reference.delete()
+    return {"message": "Chat unpinned"}
+
+@app.post("/chats/{chat_id}/archive")
+async def archive_chat(chat_id: str, current_user = Depends(get_current_user)):
+    # Check if already archived
+    archived_query = db.collection('archived_chats').where('user_id', '==', current_user['id']).where('chat_id', '==', chat_id)
+    existing = list(archived_query.stream())
+    
+    if not existing:
+        archived_chat = {
+            "user_id": current_user['id'],
+            "chat_id": chat_id,
+            "archived_at": firestore.SERVER_TIMESTAMP
+        }
+        db.collection('archived_chats').add(archived_chat)
+    
+    return {"message": "Chat archived"}
+
+@app.delete("/chats/{chat_id}/archive")
+async def unarchive_chat(chat_id: str, current_user = Depends(get_current_user)):
+    archived_query = db.collection('archived_chats').where('user_id', '==', current_user['id']).where('chat_id', '==', chat_id)
+    docs = archived_query.stream()
+    for doc in docs:
+        doc.reference.delete()
+    return {"message": "Chat unarchived"}
+
+@app.delete("/chats/{chat_id}/clear")
+async def clear_chat_history(chat_id: str, current_user = Depends(get_current_user)):
+    # Delete messages between current user and chat_id
+    messages_query = db.collection('messages').where('participants', 'array_contains_any', [current_user['id'], chat_id])
+    messages = messages_query.stream()
+    
+    for msg_doc in messages:
+        msg_data = msg_doc.to_dict()
+        if (msg_data.get('sender_id') == current_user['id'] and msg_data.get('receiver_id') == chat_id) or \
+           (msg_data.get('sender_id') == chat_id and msg_data.get('receiver_id') == current_user['id']):
+            msg_doc.reference.delete()
+    
+    return {"message": "Chat history cleared"}
+
+# ==================== MESSAGE FEATURES ====================
+@app.post("/messages/{message_id}/star")
+async def star_message(message_id: str, current_user = Depends(get_current_user)):
+    message_ref = db.collection('messages').document(message_id)
+    message_doc = message_ref.get()
+    
+    if message_doc.exists:
+        message_data = message_doc.to_dict()
+        starred_by = message_data.get('starred_by', [])
+        
+        if current_user['id'] not in starred_by:
+            starred_by.append(current_user['id'])
+            message_ref.update({'starred_by': starred_by})
+    
+    return {"message": "Message starred"}
+
+@app.delete("/messages/{message_id}/star")
+async def unstar_message(message_id: str, current_user = Depends(get_current_user)):
+    message_ref = db.collection('messages').document(message_id)
+    message_doc = message_ref.get()
+    
+    if message_doc.exists:
+        message_data = message_doc.to_dict()
+        starred_by = message_data.get('starred_by', [])
+        
+        if current_user['id'] in starred_by:
+            starred_by.remove(current_user['id'])
+            message_ref.update({'starred_by': starred_by})
+    
+    return {"message": "Message unstarred"}
+
+@app.get("/messages/starred")
+async def get_starred_messages(current_user = Depends(get_current_user)):
+    messages_query = db.collection('messages').where('starred_by', 'array_contains', current_user['id'])
+    messages = messages_query.stream()
+    
+    starred_messages = []
+    for msg_doc in messages:
+        msg_data = msg_doc.to_dict()
+        msg_data['id'] = msg_doc.id
+        starred_messages.append(msg_data)
+    
+    return starred_messages
+
+@app.post("/messages/{message_id}/forward")
+async def forward_message(message_id: str, recipient_ids: List[str], current_user = Depends(get_current_user)):
+    # Get original message
+    original_msg_ref = db.collection('messages').document(message_id)
+    original_msg_doc = original_msg_ref.get()
+    
+    if not original_msg_doc.exists:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    original_message = original_msg_doc.to_dict()
+    forwarded_count = 0
+    
+    for recipient_id in recipient_ids:
+        forwarded_message = {
+            "sender_id": current_user['id'],
+            "receiver_id": recipient_id,
+            "message_text": original_message['message_text'],
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "status": "sent",
+            "message_type": original_message['message_type'],
+            "file_url": original_message.get('file_url'),
+            "forwarded": True,
+            "original_sender_id": original_message['sender_id'],
+            "starred_by": [],
+            "edited": False,
+            "participants": [current_user['id'], recipient_id]
         }
         
-        if message_data.fileData:
-            message_doc['file'] = message_data.fileData
+        doc_ref = db.collection('messages').add(forwarded_message)
+        forwarded_count += 1
         
-        db.collection('chats').document(chat_id).collection('messages').document(message_id).set(message_doc)
-        
-        db.collection('chats').document(chat_id).update({
-            'lastMessage': message_data.content,
-            'lastMessageTime': datetime.now()
-        })
-        
-        return {"success": True, "chatId": chat_id, "messageId": message_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Emit to socket
+        await sio.emit("new_message", {
+            "id": doc_ref[1].id,
+            "sender_id": forwarded_message['sender_id'],
+            "receiver_id": recipient_id,
+            "message_text": forwarded_message['message_text'],
+            "timestamp": get_indian_time().isoformat(),
+            "message_type": forwarded_message['message_type'],
+            "forwarded": True,
+            "sender_name": current_user['name']
+        }, room=f"user_{recipient_id}")
+    
+    return {"message": f"Message forwarded to {forwarded_count} recipients"}
 
-@app.delete("/messages/delete")
-async def delete_message(delete_data: DeleteMessageRequest, uid: str = Depends(verify_token)):
-    try:
-        message_ref = db.collection('chats').document(delete_data.chatId).collection('messages').document(delete_data.messageId)
-        message = message_ref.get()
-        
-        if not message.exists:
-            raise HTTPException(status_code=404, detail="Message not found")
-        
-        message_data = message.to_dict()
-        if message_data['senderId'] != uid:
-            raise HTTPException(status_code=403, detail="Not authorized")
-        
-        if delete_data.deleteForEveryone:
-            message_ref.update({'isDeleted': True, 'content': 'This message was deleted'})
-        else:
-            message_ref.update({f'deletedFor.{uid}': True})
-        
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+# ==================== BROADCAST FEATURES ====================
+@app.post("/broadcasts/create")
+async def create_broadcast(broadcast_data: BroadcastCreate, current_user = Depends(get_current_user)):
+    broadcast = {
+        "name": broadcast_data.name,
+        "owner_id": current_user['id'],
+        "recipient_ids": broadcast_data.recipient_ids,
+        "created_at": firestore.SERVER_TIMESTAMP
+    }
+    doc_ref = db.collection('broadcasts').add(broadcast)
+    
+    return {"id": doc_ref[1].id, "message": "Broadcast list created"}
 
-@app.put("/messages/edit")
-async def edit_message(edit_data: EditMessageRequest, uid: str = Depends(verify_token)):
-    try:
-        message_ref = db.collection('chats').document(edit_data.chatId).collection('messages').document(edit_data.messageId)
-        message = message_ref.get()
-        
-        if not message.exists:
-            raise HTTPException(status_code=404, detail="Message not found")
-        
-        message_data = message.to_dict()
-        if message_data['senderId'] != uid:
-            raise HTTPException(status_code=403, detail="Not authorized")
-        
-        message_ref.update({
-            'content': edit_data.newContent,
-            'isEdited': True,
-            'editedAt': datetime.now()
-        })
-        
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+@app.get("/broadcasts")
+async def get_broadcasts(current_user = Depends(get_current_user)):
+    broadcasts_query = db.collection('broadcasts').where('owner_id', '==', current_user['id'])
+    broadcasts = broadcasts_query.stream()
+    
+    user_broadcasts = []
+    for broadcast_doc in broadcasts:
+        broadcast_data = broadcast_doc.to_dict()
+        broadcast_data['id'] = broadcast_doc.id
+        user_broadcasts.append(broadcast_data)
+    
+    return user_broadcasts
 
-@app.put("/messages/markRead")
-async def mark_message_read(read_data: MarkReadRequest, uid: str = Depends(verify_token)):
-    try:
-        message_ref = db.collection('chats').document(read_data.chatId).collection('messages').document(read_data.messageId)
-        message_ref.update({
-            'readBy': firestore.ArrayUnion([uid])
-        })
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+@app.post("/broadcasts/{broadcast_id}/send")
+async def send_broadcast_message(broadcast_id: str, message_data: BroadcastMessage, current_user = Depends(get_current_user)):
+    # Get broadcast
+    broadcast_ref = db.collection('broadcasts').document(broadcast_id)
+    broadcast_doc = broadcast_ref.get()
+    
+    if not broadcast_doc.exists or broadcast_doc.to_dict().get('owner_id') != current_user['id']:
+        raise HTTPException(status_code=404, detail="Broadcast not found")
+    
+    broadcast = broadcast_doc.to_dict()
+    sent_count = 0
+    
+    for recipient_id in broadcast['recipient_ids']:
+        message = {
+            "sender_id": current_user['id'],
+            "receiver_id": recipient_id,
+            "message_text": message_data.message_text,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "status": "sent",
+            "message_type": message_data.message_type,
+            "file_url": message_data.file_url,
+            "broadcast_id": broadcast_id,
+            "starred_by": [],
+            "edited": False,
+            "participants": [current_user['id'], recipient_id]
+        }
+        
+        doc_ref = db.collection('messages').add(message)
+        sent_count += 1
+        
+        # Emit to socket
+        await sio.emit("new_message", {
+            "id": doc_ref[1].id,
+            "sender_id": message['sender_id'],
+            "receiver_id": recipient_id,
+            "message_text": message['message_text'],
+            "timestamp": get_indian_time().isoformat(),
+            "message_type": message['message_type'],
+            "broadcast_id": broadcast_id,
+            "sender_name": current_user['name']
+        }, room=f"user_{recipient_id}")
+    
+    return {"message": f"Broadcast sent to {sent_count} recipients"}
 
-# GROUP ROUTES
-@app.post("/groups/create")
-async def create_group(group_data: CreateGroupRequest, uid: str = Depends(verify_token)):
-    try:
-        group_id = str(uuid.uuid4())
-        
-        db.collection('groups').document(group_id).set({
-            'groupId': group_id,
-            'name': group_data.name,
-            'description': group_data.description,
-            'groupIcon': group_data.groupIcon or '',
-            'adminId': uid,
-            'members': [uid] + group_data.memberIds,
-            'createdAt': datetime.now(),
-            'lastMessage': '',
-            'lastMessageTime': datetime.now()
-        })
-        
-        return {"success": True, "groupId": group_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+# ==================== USER BLOCKING ====================
+@app.post("/users/block")
+async def block_user(user_data: dict, current_user = Depends(get_current_user)):
+    user_id = user_data.get('user_id')
+    
+    # Check if already blocked
+    blocked_query = db.collection('blocked_users').where('blocker_id', '==', current_user['id']).where('blocked_id', '==', user_id)
+    existing = list(blocked_query.stream())
+    
+    if not existing:
+        blocked_user = {
+            "blocker_id": current_user['id'],
+            "blocked_id": user_id,
+            "blocked_at": firestore.SERVER_TIMESTAMP
+        }
+        db.collection('blocked_users').add(blocked_user)
+    
+    return {"message": "User blocked"}
 
-@app.post("/groups/addMember")
-async def add_group_member(member_data: AddGroupMemberRequest, uid: str = Depends(verify_token)):
-    try:
-        group_ref = db.collection('groups').document(member_data.groupId)
-        group = group_ref.get()
-        
-        if not group.exists:
-            raise HTTPException(status_code=404, detail="Group not found")
-        
-        group_data = group.to_dict()
-        if group_data['adminId'] != uid:
-            raise HTTPException(status_code=403, detail="Not authorized")
-        
-        group_ref.update({
-            'members': firestore.ArrayUnion([member_data.userId])
-        })
-        
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+@app.delete("/users/block/{user_id}")
+async def unblock_user(user_id: str, current_user = Depends(get_current_user)):
+    blocked_query = db.collection('blocked_users').where('blocker_id', '==', current_user['id']).where('blocked_id', '==', user_id)
+    docs = blocked_query.stream()
+    for doc in docs:
+        doc.reference.delete()
+    return {"message": "User unblocked"}
 
-# STATUS ROUTES
-@app.post("/status/upload")
-async def upload_status(status_data: UploadStatusRequest, uid: str = Depends(verify_token)):
-    try:
-        status_id = str(uuid.uuid4())
+@app.get("/users/blocked")
+async def get_blocked_users(current_user = Depends(get_current_user)):
+    blocked_query = db.collection('blocked_users').where('blocker_id', '==', current_user['id'])
+    blocked_docs = blocked_query.stream()
+    
+    user_blocked = []
+    for blocked_doc in blocked_docs:
+        blocked_data = blocked_doc.to_dict()
         
-        db.collection('status').document(uid).collection('statuses').document(status_id).set({
-            'statusId': status_id,
-            'content': status_data.content,
-            'mediaUrl': status_data.mediaUrl,
-            'mediaType': status_data.mediaType,
-            'timestamp': datetime.now(),
-            'expiresAt': datetime.now() + timedelta(hours=24)
-        })
-        
-        return {"success": True, "statusId": status_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/status/view/{user_id}")
-async def view_user_status(user_id: str, uid: str = Depends(verify_token)):
-    try:
-        statuses_ref = db.collection('status').document(user_id).collection('statuses')
-        query = statuses_ref.where('expiresAt', '>', datetime.now()).order_by('timestamp', direction=firestore.Query.DESCENDING)
-        statuses = query.stream()
-        
-        result = []
-        for status in statuses:
-            status_data = status.to_dict()
-            result.append({
-                'statusId': status.id,
-                'content': status_data.get('content', ''),
-                'mediaUrl': status_data.get('mediaUrl', ''),
-                'mediaType': status_data.get('mediaType', ''),
-                'timestamp': status_data.get('timestamp')
+        # Get user details
+        user_doc = db.collection('users').document(blocked_data['blocked_id']).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            user_blocked.append({
+                "id": user_data['id'] if 'id' in user_data else blocked_data['blocked_id'],
+                "name": user_data['name'],
+                "email": user_data['email'],
+                "blocked_at": blocked_data['blocked_at']
             })
+    
+    return user_blocked
+
+# ==================== NOTIFICATIONS ====================
+@app.get("/notifications")
+async def get_notifications(current_user = Depends(get_current_user)):
+    notifications_query = db.collection('notifications').where('user_id', '==', current_user['id']).order_by('created_at', direction=firestore.Query.DESCENDING)
+    notifications = notifications_query.stream()
+    
+    user_notifications = []
+    for notification_doc in notifications:
+        notification_data = notification_doc.to_dict()
+        notification_data['id'] = notification_doc.id
+        user_notifications.append(notification_data)
+    
+    return user_notifications
+
+@app.put("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, current_user = Depends(get_current_user)):
+    notification_ref = db.collection('notifications').document(notification_id)
+    notification_doc = notification_ref.get()
+    
+    if notification_doc.exists and notification_doc.to_dict().get('user_id') == current_user['id']:
+        notification_ref.update({
+            'read': True,
+            'read_at': firestore.SERVER_TIMESTAMP
+        })
+        return {"message": "Notification marked as read"}
+    
+    raise HTTPException(status_code=404, detail="Notification not found")
+
+@app.delete("/notifications/{notification_id}")
+async def delete_notification(notification_id: str, current_user = Depends(get_current_user)):
+    notification_ref = db.collection('notifications').document(notification_id)
+    notification_doc = notification_ref.get()
+    
+    if notification_doc.exists and notification_doc.to_dict().get('user_id') == current_user['id']:
+        notification_ref.delete()
+        return {"message": "Notification deleted"}
+    
+    raise HTTPException(status_code=404, detail="Notification not found")
+
+
+
+# ==================== CHAT REQUESTS ====================
+@app.get("/chat-requests")
+async def get_chat_requests(current_user = Depends(get_current_user)):
+    try:
+        print(f"Getting chat requests for user: {current_user['id']}")
         
-        return {"statuses": result}
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required")
+            
+        chat_requests_query = db.collection('chat_requests').where('receiver_id', '==', current_user['id']).where('status', '==', 'pending')
+        chat_requests = chat_requests_query.stream()
+        
+        received_requests = []
+        for request_doc in chat_requests:
+            try:
+                request_data = request_doc.to_dict()
+                request_data['id'] = request_doc.id
+                
+                # Get sender details
+                sender_doc = db.collection('users').document(request_data['sender_id']).get()
+                if sender_doc.exists:
+                    sender_data = sender_doc.to_dict()
+                    request_data['sender_name'] = sender_data['name']
+                    request_data['sender_email'] = sender_data['email']
+                    received_requests.append(request_data)
+                else:
+                    print(f"Sender {request_data['sender_id']} not found")
+            except Exception as req_error:
+                print(f"Error processing chat request {request_doc.id}: {str(req_error)}")
+                continue
+        
+        print(f"Returning {len(received_requests)} chat requests")
+        return received_requests
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Error in get_chat_requests: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch chat requests")
+
+@app.post("/chat-requests/{request_id}/respond")
+async def respond_to_chat_request(request_id: str, response_data: dict, current_user = Depends(get_current_user)):
+    action = response_data.get('action')  # 'accept' or 'decline'
+    
+    request_ref = db.collection('chat_requests').document(request_id)
+    request_doc = request_ref.get()
+    
+    if not request_doc.exists or request_doc.to_dict().get('receiver_id') != current_user['id']:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    request_data = request_doc.to_dict()
+    
+    # Update request status
+    request_ref.update({
+        'status': 'accepted' if action == 'accept' else 'declined',
+        'responded_at': firestore.SERVER_TIMESTAMP
+    })
+    
+    if action == 'accept':
+        # Add each user to other's connections
+        current_user_ref = db.collection('users').document(current_user['id'])
+        sender_ref = db.collection('users').document(request_data['sender_id'])
+        
+        # Update current user's connections
+        current_user_doc = current_user_ref.get()
+        if current_user_doc.exists:
+            connections = current_user_doc.to_dict().get('connections', [])
+            if request_data['sender_id'] not in connections:
+                connections.append(request_data['sender_id'])
+                current_user_ref.update({'connections': connections})
+        
+        # Update sender's connections
+        sender_doc = sender_ref.get()
+        if sender_doc.exists:
+            connections = sender_doc.to_dict().get('connections', [])
+            if current_user['id'] not in connections:
+                connections.append(current_user['id'])
+                sender_ref.update({'connections': connections})
+    
+    # Emit response to sender
+    await sio.emit('chat_request_response', {
+        'request_id': request_id,
+        'action': action,
+        'responder_name': current_user['name']
+    }, room=f"user_{request_data['sender_id']}")
+    
+    return {"message": f"Chat request {action}ed"}
+@app.delete("/users/me")
+async def delete_account(current_user = Depends(get_current_user)):
+    """Delete user account"""
+    try:
+        # Delete user from Firebase Auth
+        auth.delete_user(current_user['id'])
+        
+        # Delete user document from Firestore
+        db.collection('users').document(current_user['id']).delete()
+        
+        # Delete user's messages
+        messages_query = db.collection('messages').where('participants', 'array_contains', current_user['id'])
+        messages = messages_query.stream()
+        for msg in messages:
+            msg.reference.delete()
+        
+        return {"message": "Account deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting account: {str(e)}")
+
+@app.get("/search")
+async def search_messages(q: str, current_user = Depends(get_current_user)):
+    # Search in messages - Note: Firestore doesn't support full-text search natively
+    # This is a basic implementation - consider using Algolia or Elasticsearch for production
+    messages_query = db.collection('messages').where('participants', 'array_contains', current_user['id'])
+    messages = messages_query.stream()
+    
+    message_results = []
+    for msg_doc in messages:
+        msg_data = msg_doc.to_dict()
+        if q.lower() in msg_data.get('message_text', '').lower():
+            msg_data['id'] = msg_doc.id
+            
+            # Get other user details
+            other_user_id = msg_data['receiver_id'] if msg_data['sender_id'] == current_user['id'] else msg_data['sender_id']
+            other_user_doc = db.collection('users').document(other_user_id).get()
+            
+            if other_user_doc.exists:
+                other_user_data = other_user_doc.to_dict()
+                message_results.append({
+                    "message": msg_data,
+                    "other_user": other_user_data
+                })
+    
+    # Search in users
+    users_query = db.collection('users')
+    users = users_query.stream()
+    
+    user_results = []
+    for user_doc in users:
+        user_data = user_doc.to_dict()
+        if user_doc.id != current_user['id'] and \
+           (q.lower() in user_data.get('name', '').lower() or q.lower() in user_data.get('email', '').lower()):
+            user_data['id'] = user_doc.id
+            user_results.append(user_data)
+    
+    return {"messages": message_results, "users": user_results}
+
+# Group routes
+@app.post("/groups/create")
+async def create_group(group_data: GroupCreate, current_user = Depends(get_current_user)):
+    group = {
+        "name": group_data.name,
+        "group_image": None,
+        "admin_ids": [current_user['id']],
+        "member_ids": group_data.member_ids + [current_user['id']],
+        "created_at": firestore.SERVER_TIMESTAMP
+    }
+    doc_ref = db.collection('groups').add(group)
+    
+    return {"id": doc_ref[1].id, "name": group_data.name}
+
+@app.get("/groups")
+async def get_groups(current_user = Depends(get_current_user)):
+    groups_query = db.collection('groups').where('member_ids', 'array_contains', current_user['id'])
+    groups = groups_query.stream()
+    
+    user_groups = []
+    for group_doc in groups:
+        group_data = group_doc.to_dict()
+        group_data['id'] = group_doc.id
+        user_groups.append({
+            "id": group_data['id'], 
+            "name": group_data['name'], 
+            "group_image": group_data.get('group_image')
+        })
+    
+    return user_groups
+
+# Socket.IO events
+@sio.event
+async def connect(sid, environ, auth=None):
+    print(f"Client {sid} connected")
+    return True
+
+@sio.event
+async def disconnect(sid):
+    print(f"Client {sid} disconnected")
+    user_id = None
+    for uid, session_data in user_sessions.items():
+        if session_data.get('sid') == sid:
+            user_id = uid
+            break
+    
+    if user_id:
+        online_users.pop(user_id, None)
+        user_sessions.pop(user_id, None)
+        await update_user_status(user_id, False)
+
+@sio.event
+async def join_room(sid, data):
+    user_id = data.get("user_id")
+    if user_id:
+        sio.enter_room(sid, f"user_{user_id}")
+        # Track online user
+        online_users[user_id] = {
+            'sid': sid,
+            'connected_at': get_indian_time().isoformat()
+        }
+        user_sessions[user_id] = {'sid': sid}
+        await update_user_status(user_id, True)
+
+@sio.event
+async def typing(sid, data):
+    receiver_id = data.get('receiver_id')
+    if receiver_id:
+        await sio.emit("user_typing", data, room=f"user_{receiver_id}")
+
+@sio.event
+async def webrtc_signal(sid, data):
+    target_user = data.get('target_user')
+    if target_user:
+        await sio.emit('webrtc_signal', data, room=f"user_{target_user}")
+
+@sio.event
+async def heartbeat(sid, data):
+    user_id = data.get('user_id')
+    if user_id and user_id in online_users:
+        online_users[user_id]['last_heartbeat'] = get_indian_time().isoformat()
+        await update_user_status(user_id, True)
+
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(socket_app, host="0.0.0.0", port=8000, reload=True)
+
+# For Render deployment
+app = socket_app
