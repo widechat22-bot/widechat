@@ -25,15 +25,18 @@ class ProfileUpdate(BaseModel):
 class PrivacySettings(BaseModel):
     profile_photo_visibility: str = "everyone"  # everyone, contacts, nobody
     last_seen_visibility: str = "everyone"
-    status_visibility: str = "everyone"
+    about_visibility: str = "everyone"
+    read_receipts: bool = True
+    groups_visibility: str = "everyone"
+    public_discovery: bool = True
 
 # Message models
 class MessageSend(BaseModel):
-    receiver_id: Optional[int] = None
-    group_id: Optional[int] = None
+    receiver_id: Optional[str] = None
+    group_id: Optional[str] = None
     message_text: str
     message_type: str = "text"  # text, image, video, audio, document, location, contact
-    reply_to_id: Optional[int] = None
+    reply_to_id: Optional[str] = None
     caption: Optional[str] = None
     file_url: Optional[str] = None
     location_lat: Optional[float] = None
@@ -41,7 +44,7 @@ class MessageSend(BaseModel):
     contact_data: Optional[dict] = None
 
 class MessageReaction(BaseModel):
-    message_id: int
+    message_id: str
     emoji: str
 
 class MessageEdit(BaseModel):
@@ -50,8 +53,9 @@ class MessageEdit(BaseModel):
 # Group models
 class GroupCreate(BaseModel):
     name: str
-    member_ids: List[int]
+    member_ids: List[str] = []
     description: Optional[str] = None
+    privacy: str = "open"  # open, closed, secret
 
 class GroupUpdate(BaseModel):
     name: Optional[str] = None
@@ -59,7 +63,7 @@ class GroupUpdate(BaseModel):
     group_image_url: Optional[str] = None
 
 class GroupMemberAction(BaseModel):
-    user_id: int
+    user_id: str
     action: str  # add, remove, promote, demote
 
 # Status models
@@ -70,21 +74,21 @@ class StatusUpdate(BaseModel):
 
 # Call models
 class CallInitiate(BaseModel):
-    receiver_id: Optional[int] = None
-    group_id: Optional[int] = None
+    receiver_id: Optional[str] = None
+    group_id: Optional[str] = None
     call_type: str  # voice, video
 
 class CallResponse(BaseModel):
-    call_id: int
+    call_id: str
     action: str  # accept, reject, end
 
 # Broadcast models
 class BroadcastCreate(BaseModel):
     name: str
-    recipient_ids: List[int]
+    recipient_ids: List[str]
 
 class BroadcastMessage(BaseModel):
-    broadcast_id: int
+    broadcast_id: str
     message_text: str
     message_type: str = "text"
     file_url: Optional[str] = None
@@ -97,7 +101,7 @@ class TwoFactorVerify(BaseModel):
     token: str
 
 class BlockUser(BaseModel):
-    user_id: int
+    user_id: str
 
 # Private messaging models
 class ChatRequest(BaseModel):
@@ -105,5 +109,5 @@ class ChatRequest(BaseModel):
     message: Optional[str] = "Hi! I'd like to connect with you."
 
 class ChatRequestResponse(BaseModel):
-    request_id: int
+    request_id: str
     action: str  # accept, reject
