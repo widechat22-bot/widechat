@@ -656,7 +656,7 @@ async def debug_drive():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://widechatapp.web.app", "https://widechatmessage.web.app", "https://widechat-q4g3.onrender.com", "http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "*"],
+    allow_origins=["https://widechatapp.web.app", "https://widechatmessage.web.app", "https://widechat.onrender.com", "https://widechat-q4g3.onrender.com", "http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1191,7 +1191,10 @@ async def initiate_call(call_data: dict, current_user = Depends(get_current_user
     
     receiver_data = receiver_doc.to_dict()
     
-    call = {
+    # Use datetime for socket emission, SERVER_TIMESTAMP for database
+    current_time = datetime.utcnow()
+    
+    call_db = {
         "caller_id": current_user['id'],
         "receiver_id": receiver_id,
         "call_type": call_data.get('call_type', 'voice'),
@@ -1201,15 +1204,26 @@ async def initiate_call(call_data: dict, current_user = Depends(get_current_user
         "started_at": firestore.SERVER_TIMESTAMP,
         "participants": [current_user['id'], receiver_id]
     }
-    doc_ref = db.collection('calls').add(call)
+    doc_ref = db.collection('calls').add(call_db)
     call_id = doc_ref[1].id
     
-    # Emit to receiver with complete call data
-    call['id'] = call_id
-    print(f"Emitting incoming_call to user_{receiver_id}: {call}")
-    await sio.emit("incoming_call", call, room=f"user_{receiver_id}")
+    # Create serializable call object for socket emission
+    call_socket = {
+        "id": call_id,
+        "caller_id": current_user['id'],
+        "receiver_id": receiver_id,
+        "call_type": call_data.get('call_type', 'voice'),
+        "caller_name": current_user['name'],
+        "receiver_name": receiver_data['name'],
+        "status": "ringing",
+        "started_at": current_time.isoformat(),
+        "participants": [current_user['id'], receiver_id]
+    }
     
-    return {"call_id": call_id, "status": "initiated", "call": call}
+    print(f"Emitting incoming_call to user_{receiver_id}: {call_socket}")
+    await sio.emit("incoming_call", call_socket, room=f"user_{receiver_id}")
+    
+    return {"call_id": call_id, "status": "initiated", "call": call_socket}
 
 @app.post("/calls/respond")
 async def respond_to_call(response_data: dict, current_user = Depends(get_current_user)):
