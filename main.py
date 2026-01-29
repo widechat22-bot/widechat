@@ -793,14 +793,14 @@ async def update_invite_code(invite_data: dict, current_user = Depends(get_curre
     if len(new_invite_code) < 3 or len(new_invite_code) > 20:
         raise HTTPException(status_code=400, detail="Invite code must be between 3-20 characters")
     
-    # Check if invite code already exists
+    # Check if invite code already exists (excluding current user)
     users_query = db.collection('users').where('invite_code', '==', new_invite_code).limit(1)
     existing_users = list(users_query.stream())
     
     if existing_users and existing_users[0].id != current_user['id']:
         raise HTTPException(status_code=409, detail="Invite code already taken")
     
-    # Update user's invite code
+    # Update user's invite code (keep existing connections intact)
     user_ref = db.collection('users').document(current_user['id'])
     user_ref.update({'invite_code': new_invite_code})
     
@@ -865,7 +865,13 @@ async def get_connections(current_user = Depends(get_current_user)):
                         "last_message": last_message
                     })
                 else:
-                    print(f"Connection user {conn_id} not found")
+                    print(f"Connection user {conn_id} not found - removing from connections")
+                    # Remove invalid connection from user's connections list
+                    current_user_ref = db.collection('users').document(current_user['id'])
+                    current_connections = current_user.get('connections', [])
+                    if conn_id in current_connections:
+                        current_connections.remove(conn_id)
+                        current_user_ref.update({'connections': current_connections})
             except Exception as conn_error:
                 print(f"Error processing connection {conn_id}: {str(conn_error)}")
                 continue
@@ -1709,14 +1715,17 @@ async def search_messages(q: str, current_user = Depends(get_current_user)):
 async def create_group(group_data: GroupCreate, current_user = Depends(get_current_user)):
     group = {
         "name": group_data.name,
+        "description": group_data.description,
+        "privacy": group_data.privacy,
         "group_image": None,
         "admin_ids": [current_user['id']],
-        "member_ids": group_data.member_ids + [current_user['id']],
-        "created_at": firestore.SERVER_TIMESTAMP
+        "member_ids": list(set(group_data.member_ids + [current_user['id']])),  # Ensure no duplicates
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "invite_code": secrets.token_urlsafe(12) if group_data.privacy in ['open', 'closed'] else None
     }
     doc_ref = db.collection('groups').add(group)
     
-    return {"id": doc_ref[1].id, "name": group_data.name}
+    return {"id": doc_ref[1].id, "name": group_data.name, "message": "Group created successfully"}
 
 @app.get("/groups")
 async def get_groups(current_user = Depends(get_current_user)):
