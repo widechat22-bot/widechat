@@ -1713,16 +1713,53 @@ async def search_messages(q: str, current_user = Depends(get_current_user)):
 # Group routes
 @app.post("/groups/create")
 async def create_group(group_data: GroupCreate, current_user = Depends(get_current_user)):
+    # Validate group name
+    if not group_data.name.strip():
+        raise HTTPException(status_code=400, detail="Group name is required")
+    
+    if len(group_data.name) > 50:
+        raise HTTPException(status_code=400, detail="Group name must be 50 characters or less")
+    
+    if group_data.description and len(group_data.description) > 200:
+        raise HTTPException(status_code=400, detail="Description must be 200 characters or less")
+    
+    # Validate privacy setting
+    if group_data.privacy not in ["open", "closed", "secret"]:
+        raise HTTPException(status_code=400, detail="Invalid privacy setting")
+    
+    # Generate invite code for the group
+    invite_code = secrets.token_urlsafe(12)
+    
     group = {
-        "name": group_data.name,
+        "name": group_data.name.strip(),
+        "description": group_data.description.strip() if group_data.description else None,
+        "privacy": group_data.privacy,
+        "invite_code": invite_code,
         "group_image": None,
         "admin_ids": [current_user['id']],
-        "member_ids": group_data.member_ids + [current_user['id']],
-        "created_at": firestore.SERVER_TIMESTAMP
+        "member_ids": [current_user['id']] + group_data.member_ids,
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "created_by": current_user['id']
     }
-    doc_ref = db.collection('groups').add(group)
     
-    return {"id": doc_ref[1].id, "name": group_data.name}
+    doc_ref = db.collection('groups').add(group)
+    group_id = doc_ref[1].id
+    
+    # Emit group creation to all members
+    for member_id in group['member_ids']:
+        await sio.emit('group_created', {
+            'group_id': group_id,
+            'name': group_data.name,
+            'created_by': current_user['name']
+        }, room=f"user_{member_id}")
+    
+    return {
+        "id": group_id, 
+        "name": group_data.name,
+        "privacy": group_data.privacy,
+        "invite_code": invite_code,
+        "message": "Group created successfully"
+    }
 
 @app.get("/groups")
 async def get_groups(current_user = Depends(get_current_user)):
