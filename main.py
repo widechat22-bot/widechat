@@ -769,9 +769,9 @@ async def get_qr_code(current_user = Depends(get_current_user)):
     if not invite_code:
         raise HTTPException(status_code=404, detail="Invite code not found")
     
-    # Create QR code
+    # Create QR code with web link
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(f"widechat://connect/{invite_code}")
+    qr.add_data(f"https://widechatapp.web.app/?invite={invite_code}")
     qr.make(fit=True)
     
     img = qr.make_image(fill_color="black", back_color="white")
@@ -781,6 +781,30 @@ async def get_qr_code(current_user = Depends(get_current_user)):
     
     img_str = base64.b64encode(buffer.getvalue()).decode()
     return {"qr_code": f"data:image/png;base64,{img_str}"}
+
+@app.put("/users/invite-code")
+async def update_invite_code(invite_data: dict, current_user = Depends(get_current_user)):
+    """Update user's custom invite code"""
+    new_invite_code = invite_data.get('invite_code', '').strip()
+    
+    if not new_invite_code:
+        raise HTTPException(status_code=400, detail="Invite code cannot be empty")
+    
+    if len(new_invite_code) < 3 or len(new_invite_code) > 20:
+        raise HTTPException(status_code=400, detail="Invite code must be between 3-20 characters")
+    
+    # Check if invite code already exists
+    users_query = db.collection('users').where('invite_code', '==', new_invite_code).limit(1)
+    existing_users = list(users_query.stream())
+    
+    if existing_users and existing_users[0].id != current_user['id']:
+        raise HTTPException(status_code=409, detail="Invite code already taken")
+    
+    # Update user's invite code
+    user_ref = db.collection('users').document(current_user['id'])
+    user_ref.update({'invite_code': new_invite_code})
+    
+    return {"message": "Invite code updated successfully", "invite_code": new_invite_code}
 
 @app.get("/users/connections")
 async def get_connections(current_user = Depends(get_current_user)):
