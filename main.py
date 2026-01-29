@@ -28,7 +28,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request as GoogleRequest
+from google.auth.transport.requests import Request as GoogleAuthRequest
 import pickle
 import io
 
@@ -159,7 +159,7 @@ class GoogleDriveService:
             # If no valid credentials, run OAuth flow
             if not creds or not creds.valid:
                 if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(GoogleRequest())
+                    creds.refresh(GoogleAuthRequest())
                 else:
                     # Check if credentials.json exists
                     if os.path.exists('credentials.json'):
