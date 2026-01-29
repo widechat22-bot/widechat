@@ -806,7 +806,25 @@ async def update_invite_code(invite_data: dict, current_user = Depends(get_curre
     
     return {"message": "Invite code updated successfully", "invite_code": new_invite_code}
 
-@app.get("/users/connections")
+@app.get("/users/contacts")
+async def get_user_contacts(current_user = Depends(get_current_user)):
+    """Get user's contacts for group member selection"""
+    connections = current_user.get('connections', [])
+    
+    contacts = []
+    for conn_id in connections:
+        user_doc = db.collection('users').document(conn_id).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            contacts.append({
+                "id": conn_id,
+                "name": user_data['name'],
+                "email": user_data['email'],
+                "is_online": user_data.get('is_online', False),
+                "profile_image_url": user_data.get('profile_image_url')
+            })
+    
+    return contacts
 async def get_connections(current_user = Depends(get_current_user)):
     """Get user connections"""
     try:
@@ -1726,6 +1744,12 @@ async def create_group(group_data: GroupCreate, current_user = Depends(get_curre
     # Validate privacy setting
     if group_data.privacy not in ["open", "closed", "secret"]:
         raise HTTPException(status_code=400, detail="Invalid privacy setting")
+    
+    # Validate that all member_ids are in user's connections
+    user_connections = current_user.get('connections', [])
+    for member_id in group_data.member_ids:
+        if member_id not in user_connections:
+            raise HTTPException(status_code=400, detail="Can only add contacts to group")
     
     # Generate invite code for the group
     invite_code = secrets.token_urlsafe(12)
