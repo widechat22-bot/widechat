@@ -116,23 +116,25 @@ class FileUtils:
 import json
 try:
     # Try to load from environment variable (JSON string)
-    firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    firebase_config = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    print(f"Firebase config found: {bool(firebase_config)}")
     
-    if firebase_config:
-        print("Loading Firebase from environment variable")
-        # Parse JSON string from environment variable
-        service_account_info = json.loads(firebase_config)
-        cred = credentials.Certificate(service_account_info)
+    if firebase_config and firebase_config.startswith('{'):
+        print("Loading Firebase from JSON string")
+        cred = credentials.Certificate(json.loads(firebase_config))
     else:
-        print("No Firebase config found in environment variables")
-        raise Exception("FIREBASE_SERVICE_ACCOUNT_JSON environment variable not set")
-        
-except json.JSONDecodeError as e:
-    print(f"Invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
-    raise Exception("Invalid Firebase service account JSON")
+        print("Loading Firebase from file path")
+        # Fallback to file path
+        cred = credentials.Certificate(firebase_config or "./firebase-service-account.json")
 except Exception as e:
     print(f"Firebase initialization error: {e}")
-    raise e
+    # Fallback to file
+    try:
+        print("Trying fallback file path")
+        cred = credentials.Certificate("./firebase-service-account.json")
+    except Exception as e2:
+        print(f"Fallback also failed: {e2}")
+        raise e2
 
 print("Initializing Firebase app...")
 firebase_admin.initialize_app(cred)
@@ -163,7 +165,14 @@ class GoogleDriveService:
                     if os.path.exists('credentials.json'):
                         flow = InstalledAppFlow.from_client_secrets_file(
                             'credentials.json', self.SCOPES)
-                        creds = flow.run_local_server(port=0)
+                        flow.redirect_uri = 'http://localhost:8000/oauth2callback'
+                        # Get authorization URL
+                        auth_url, _ = flow.authorization_url(prompt='consent')
+                        print(f"Please visit this URL to authorize: {auth_url}")
+                        print("After authorization, you'll be redirected. Copy the 'code' parameter from the URL.")
+                        auth_code = input("Enter the authorization code: ")
+                        flow.fetch_token(code=auth_code)
+                        creds = flow.credentials
                     else:
                         print("credentials.json not found. Please create OAuth2 credentials.")
                         return
@@ -949,11 +958,12 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
         raise HTTPException(status_code=403, detail="Not authorized to message this user")
     
     # Create message
+    current_timestamp = datetime.utcnow()
     message_doc = {
         "sender_id": current_user['id'],
         "receiver_id": message_data.receiver_id,
         "message_text": message_data.message_text,
-        "timestamp": firestore.SERVER_TIMESTAMP,
+        "timestamp": current_timestamp,
         "status": "sent",
         "message_type": message_data.message_type,
         "file_url": message_data.file_url,
@@ -968,18 +978,24 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
     doc_ref = db.collection('messages').add(message_doc)
     message_id = doc_ref[1].id
     
-    # Emit to socket
-    await sio.emit("new_message", {
+    # Emit to socket (both sender and receiver)
+    message_payload = {
         "id": message_id,
         "sender_id": current_user['id'],
         "receiver_id": message_data.receiver_id,
         "message_text": message_data.message_text,
-        "timestamp": get_indian_time().isoformat(),
+        "timestamp": current_timestamp.isoformat(),
         "message_type": message_data.message_type,
         "file_url": message_data.file_url,
         "caption": message_data.caption,
         "sender_name": current_user['name']
-    }, room=f"user_{message_data.receiver_id}")
+    }
+    
+    # Emit to receiver
+    await sio.emit("new_message", message_payload, room=f"user_{message_data.receiver_id}")
+    
+    # Emit to sender (for timestamp correction)
+    await sio.emit("new_message", message_payload, room=f"user_{current_user['id']}")
     
     return {"id": message_id, "message": "Message sent"}
 
