@@ -1182,22 +1182,34 @@ async def upload_file(file: UploadFile = File(...), current_user = Depends(get_c
 # Call routes
 @app.post("/calls/initiate")
 async def initiate_call(call_data: dict, current_user = Depends(get_current_user)):
+    receiver_id = call_data.get('receiver_id')
+    
+    # Get receiver details
+    receiver_doc = db.collection('users').document(receiver_id).get()
+    if not receiver_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    receiver_data = receiver_doc.to_dict()
+    
     call = {
         "caller_id": current_user['id'],
-        "receiver_id": call_data.get('receiver_id'),
+        "receiver_id": receiver_id,
         "call_type": call_data.get('call_type', 'voice'),
+        "caller_name": current_user['name'],
+        "receiver_name": receiver_data['name'],
         "status": "ringing",
         "started_at": firestore.SERVER_TIMESTAMP,
-        "participants": [current_user['id'], call_data.get('receiver_id')]
+        "participants": [current_user['id'], receiver_id]
     }
     doc_ref = db.collection('calls').add(call)
     call_id = doc_ref[1].id
     
-    # Emit to receiver
+    # Emit to receiver with complete call data
     call['id'] = call_id
-    await sio.emit("incoming_call", call, room=f"user_{call['receiver_id']}")
+    print(f"Emitting incoming_call to user_{receiver_id}: {call}")
+    await sio.emit("incoming_call", call, room=f"user_{receiver_id}")
     
-    return {"call_id": call_id, "status": "initiated"}
+    return {"call_id": call_id, "status": "initiated", "call": call}
 
 @app.post("/calls/respond")
 async def respond_to_call(response_data: dict, current_user = Depends(get_current_user)):
@@ -1833,6 +1845,7 @@ async def typing(sid, data):
 async def webrtc_signal(sid, data):
     target_user = data.get('target_user')
     if target_user:
+        print(f"Relaying WebRTC signal from {data.get('from_user')} to {target_user}")
         await sio.emit('webrtc_signal', data, room=f"user_{target_user}")
 
 @sio.event
