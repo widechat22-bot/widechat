@@ -28,7 +28,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.auth.transport.requests import Request as GoogleRequest
 import pickle
 import io
 
@@ -159,7 +159,7 @@ class GoogleDriveService:
             # If no valid credentials, run OAuth flow
             if not creds or not creds.valid:
                 if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(GoogleAuthRequest())
+                    creds.refresh(GoogleRequest())
                 else:
                     # Check if credentials.json exists
                     if os.path.exists('credentials.json'):
@@ -1715,17 +1715,14 @@ async def search_messages(q: str, current_user = Depends(get_current_user)):
 async def create_group(group_data: GroupCreate, current_user = Depends(get_current_user)):
     group = {
         "name": group_data.name,
-        "description": group_data.description,
-        "privacy": group_data.privacy,
         "group_image": None,
         "admin_ids": [current_user['id']],
-        "member_ids": list(set(group_data.member_ids + [current_user['id']])),  # Ensure no duplicates
-        "created_at": firestore.SERVER_TIMESTAMP,
-        "invite_code": secrets.token_urlsafe(12) if group_data.privacy in ['open', 'closed'] else None
+        "member_ids": group_data.member_ids + [current_user['id']],
+        "created_at": firestore.SERVER_TIMESTAMP
     }
     doc_ref = db.collection('groups').add(group)
     
-    return {"id": doc_ref[1].id, "name": group_data.name, "message": "Group created successfully"}
+    return {"id": doc_ref[1].id, "name": group_data.name}
 
 @app.get("/groups")
 async def get_groups(current_user = Depends(get_current_user)):
