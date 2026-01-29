@@ -1858,9 +1858,25 @@ async def typing(sid, data):
 @sio.event
 async def webrtc_signal(sid, data):
     target_user = data.get('target_user')
-    if target_user:
-        print(f"Relaying WebRTC signal from {data.get('from_user')} to {target_user}")
-        await sio.emit('webrtc_signal', data, room=f"user_{target_user}")
+    signal = data.get('signal')
+    call_id = data.get('call_id')
+    from_user = data.get('from_user')
+    
+    if target_user and signal:
+        print(f"Relaying WebRTC signal from {from_user} to {target_user} for call {call_id}")
+        print(f"Signal type: {signal.get('type', 'unknown')}")
+        
+        # Relay the signal to the target user
+        await sio.emit('webrtc_signal', {
+            'signal': signal,
+            'call_id': call_id,
+            'from_user': from_user,
+            'target_user': target_user
+        }, room=f"user_{target_user}")
+        
+        print(f"Signal relayed successfully to user_{target_user}")
+    else:
+        print(f"Invalid WebRTC signal data: {data}")
 
 @sio.event
 async def heartbeat(sid, data):
