@@ -484,7 +484,7 @@ async def cleanup_inactive_users():
                 # Emit user offline status
                 await sio.emit('user_offline', {
                     'user_id': user_id,
-                    'last_seen': get_indian_time().isoformat()
+                    'last_seen': get_indian_time().isoformat() + 'Z'
                 })
                 
         except Exception as e:
@@ -507,7 +507,7 @@ security = HTTPBearer()
 security_optional = HTTPBearer(auto_error=False)
 
 def get_indian_time():
-    return datetime.now()
+    return datetime.utcnow()
 
 async def get_current_user_optional(credentials: HTTPAuthorizationCredentials = Depends(security_optional)):
     """Optional authentication - returns None if no valid token"""
@@ -987,13 +987,12 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
     if current_user['id'] not in receiver_data.get('connections', []):
         raise HTTPException(status_code=403, detail="Not authorized to message this user")
     
-    # Create message
-    current_timestamp = datetime.utcnow()
+    # Create message with UTC timestamp
     message_doc = {
         "sender_id": current_user['id'],
         "receiver_id": message_data.receiver_id,
         "message_text": message_data.message_text,
-        "timestamp": current_timestamp,
+        "timestamp": firestore.SERVER_TIMESTAMP,
         "status": "sent",
         "message_type": message_data.message_type,
         "file_url": message_data.file_url,
@@ -1008,24 +1007,22 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
     doc_ref = db.collection('messages').add(message_doc)
     message_id = doc_ref[1].id
     
-    # Emit to socket (both sender and receiver)
+    # Emit to socket with UTC timestamp
+    current_timestamp = datetime.utcnow()
     message_payload = {
         "id": message_id,
         "sender_id": current_user['id'],
         "receiver_id": message_data.receiver_id,
         "message_text": message_data.message_text,
-        "timestamp": current_timestamp.isoformat(),
+        "timestamp": current_timestamp.isoformat() + 'Z',
         "message_type": message_data.message_type,
         "file_url": message_data.file_url,
         "caption": message_data.caption,
         "sender_name": current_user['name']
     }
     
-    # Emit to receiver
+    # Emit to receiver only
     await sio.emit("new_message", message_payload, room=f"user_{message_data.receiver_id}")
-    
-    # Emit to sender (for timestamp correction)
-    await sio.emit("new_message", message_payload, room=f"user_{current_user['id']}")
     
     return {"id": message_id, "message": "Message sent"}
 
@@ -1827,7 +1824,7 @@ async def disconnect(sid):
         # Emit user offline status to all connected users
         await sio.emit('user_offline', {
             'user_id': user_id,
-            'last_seen': get_indian_time().isoformat()
+            'last_seen': get_indian_time().isoformat() + 'Z'
         }, skip_sid=sid)
 
 @sio.event
@@ -1838,7 +1835,7 @@ async def join_room(sid, data):
         # Track online user
         online_users[user_id] = {
             'sid': sid,
-            'connected_at': get_indian_time().isoformat()
+            'connected_at': get_indian_time().isoformat() + 'Z'
         }
         user_sessions[user_id] = {'sid': sid}
         await update_user_status(user_id, True)
@@ -1846,7 +1843,7 @@ async def join_room(sid, data):
         # Emit user online status to all connected users immediately
         await sio.emit('user_online', {
             'user_id': user_id,
-            'timestamp': get_indian_time().isoformat()
+            'timestamp': get_indian_time().isoformat() + 'Z'
         })
 
 @sio.event
@@ -1879,10 +1876,32 @@ async def webrtc_signal(sid, data):
         print(f"Invalid WebRTC signal data: {data}")
 
 @sio.event
+async def screen_share_status(sid, data):
+    target_user = data.get('target_user')
+    is_sharing = data.get('is_sharing')
+    call_id = data.get('call_id')
+    from_user = data.get('from_user')
+    
+    if target_user is not None:
+        print(f"Relaying screen share status from {from_user} to {target_user} for call {call_id}: {is_sharing}")
+        
+        # Relay the screen share status to the target user
+        await sio.emit('screen_share_status', {
+            'is_sharing': is_sharing,
+            'call_id': call_id,
+            'from_user': from_user,
+            'target_user': target_user
+        }, room=f"user_{target_user}")
+        
+        print(f"Screen share status relayed successfully to user_{target_user}")
+    else:
+        print(f"Invalid screen share status data: {data}")
+
+@sio.event
 async def heartbeat(sid, data):
     user_id = data.get('user_id')
     if user_id and user_id in online_users:
-        online_users[user_id]['last_heartbeat'] = get_indian_time().isoformat()
+        online_users[user_id]['last_heartbeat'] = get_indian_time().isoformat() + 'Z'
         await update_user_status(user_id, True)
 
 
