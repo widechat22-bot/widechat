@@ -1731,8 +1731,15 @@ async def join_room(sid, data):
 @sio.event
 async def typing(sid, data):
     receiver_id = data.get('receiver_id')
-    if receiver_id:
-        await sio.emit("user_typing", data, room=f"user_{receiver_id}")
+    user_id = data.get('user_id')
+    is_typing = data.get('is_typing')
+    
+    if receiver_id and user_id is not None:
+        # Only emit to the specific receiver
+        await sio.emit("user_typing", {
+            'user_id': user_id,
+            'is_typing': is_typing
+        }, room=f"user_{receiver_id}")
 
 @sio.event
 async def webrtc_signal(sid, data):
