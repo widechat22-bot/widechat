@@ -23,15 +23,6 @@ from cryptography.fernet import Fernet
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
-# Google Drive imports
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from google.oauth2 import service_account
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request as GoogleRequest
-import pickle
-import io
-
 import os
 from dotenv import load_dotenv
 
@@ -141,130 +132,10 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 print("Firebase initialized successfully")
 
-# ==================== GOOGLE DRIVE SERVICE ====================
-class GoogleDriveService:
-    def __init__(self):
-        self.service = None
-        self.SCOPES = ['https://www.googleapis.com/auth/drive']
-        self._initialize_service()
-    
-    def _initialize_service(self):
-        try:
-            creds = None
-            # Check if token.pickle exists
-            if os.path.exists('token.pickle'):
-                with open('token.pickle', 'rb') as token:
-                    creds = pickle.load(token)
-            
-            # If no valid credentials, run OAuth flow
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(GoogleRequest())
-                else:
-                    # Check if credentials.json exists
-                    if os.path.exists('credentials.json'):
-                        flow = InstalledAppFlow.from_client_secrets_file(
-                            'credentials.json', self.SCOPES)
-                        flow.redirect_uri = 'http://localhost:8000/oauth2callback'
-                        # Get authorization URL
-                        auth_url, _ = flow.authorization_url(prompt='consent')
-                        print(f"Please visit this URL to authorize: {auth_url}")
-                        print("After authorization, you'll be redirected. Copy the 'code' parameter from the URL.")
-                        auth_code = input("Enter the authorization code: ")
-                        flow.fetch_token(code=auth_code)
-                        creds = flow.credentials
-                    else:
-                        print("credentials.json not found. Please create OAuth2 credentials.")
-                        return
-                
-                # Save credentials for next run
-                with open('token.pickle', 'wb') as token:
-                    pickle.dump(creds, token)
-            
-            self.service = build('drive', 'v3', credentials=creds)
-            print("Google Drive OAuth2 service initialized successfully")
-            
-        except Exception as e:
-            print(f"Google Drive OAuth2 initialization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            self.service = None
-    
-    def create_user_folder(self, user_email: str) -> str:
-        """Create a folder for the user in Google Drive root"""
-        try:
-            folder_metadata = {
-                "name": user_email,
-                "mimeType": "application/vnd.google-apps.folder"
-            }
-            folder = self.service.files().create(
-                body=folder_metadata,
-                fields="id"
-            ).execute()
-            print(f"Created folder for user {user_email}: {folder['id']}")
-            return folder["id"]
-        except Exception as e:
-            print(f"Error creating user folder: {e}")
-            raise e
-    
-    def delete_user_folder(self, folder_id: str):
-        """Delete user folder and all files in it"""
-        try:
-            self.service.files().delete(fileId=folder_id).execute()
-            print(f"Deleted user folder: {folder_id}")
-        except Exception as e:
-            print(f"Error deleting user folder: {e}")
-            raise e
-    
-    async def upload_file(self, file_content: bytes, filename: str, mime_type: str, folder_id: str = None) -> str:
-        if not self.service:
-            raise Exception("Google Drive service not initialized")
-        
-        try:
-            print(f"Uploading file to Google Drive: {filename} ({len(file_content)} bytes)")
-            
-            file_metadata = {
-                'name': filename
-            }
-            
-            # If folder_id provided, upload to that folder
-            if folder_id:
-                file_metadata['parents'] = [folder_id]
-            
-            media = MediaIoBaseUpload(
-                io.BytesIO(file_content),
-                mimetype=mime_type,
-                resumable=False
-            )
-            
-            file = self.service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id,webViewLink,webContentLink'
-            ).execute()
-            
-            file_id = file['id']
-            print(f"File uploaded to Google Drive with ID: {file_id}")
-            
-            # Make file publicly accessible
-            try:
-                self.service.permissions().create(
-                    fileId=file_id,
-                    body={'role': 'reader', 'type': 'anyone'}
-                ).execute()
-                print(f"File permissions set to public for ID: {file_id}")
-            except Exception as perm_error:
-                print(f"Permission setting failed: {perm_error}")
-            
-            return f"https://drive.google.com/uc?id={file_id}"
-        except Exception as e:
-            print(f"Google Drive upload error: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise e
 
-# Initialize Google Drive service
-google_drive_service = GoogleDriveService()
+
+# Create uploads directory if it doesn't exist
+os.makedirs('uploads', exist_ok=True)
 
 # ==================== FIREBASE SERVICE CLASS ====================
 class FirebaseService:
@@ -582,7 +453,6 @@ async def test_endpoint():
     return {
         "message": "Test endpoint working",
         "firebase_configured": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")),
-        "google_drive_service": google_drive_service.service is not None,
         "timestamp": get_indian_time().isoformat()
     }
 
@@ -637,22 +507,10 @@ async def debug_headers(request: Request):
         "authorization": request.headers.get("authorization", "Not found")
     }
 
-@app.get("/debug/drive")
-async def debug_drive():
-    """Debug endpoint to test Google Drive service"""
-    try:
-        if not google_drive_service.service:
-            return {"status": "error", "message": "Google Drive service not initialized"}
-        
-        # Try to list files to test the service
-        results = google_drive_service.service.files().list(pageSize=1).execute()
-        return {
-            "status": "success", 
-            "message": "Google Drive service is working",
-            "files_count": len(results.get('files', []))
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+
+
+# Mount static files
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,
@@ -684,13 +542,6 @@ async def register(user_data: UserCreate):
             display_name=user_data.name
         )
         
-        # Create user folder in Google Drive
-        try:
-            folder_id = google_drive_service.create_user_folder(user_data.email)
-        except Exception as drive_error:
-            print(f"Failed to create Drive folder: {drive_error}")
-            folder_id = None
-        
         # Create user in Firestore
         user_doc = {
             "email": user_data.email,
@@ -699,8 +550,7 @@ async def register(user_data: UserCreate):
             "status_message": "Available",
             "is_online": True,
             "invite_code": secrets.token_urlsafe(12),
-            "connections": [],
-            "drive_folder_id": folder_id
+            "connections": []
         }
         
         db.collection('users').document(firebase_user.uid).set(user_doc)
@@ -987,6 +837,23 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
     if current_user['id'] not in receiver_data.get('connections', []):
         raise HTTPException(status_code=403, detail="Not authorized to message this user")
     
+    # Get reply message data if replying
+    reply_to_message = None
+    if message_data.reply_to_id:
+        reply_msg_ref = db.collection('messages').document(message_data.reply_to_id)
+        reply_msg_doc = reply_msg_ref.get()
+        if reply_msg_doc.exists:
+            reply_msg_data = reply_msg_doc.to_dict()
+            # Get sender name for reply
+            sender_doc = db.collection('users').document(reply_msg_data['sender_id']).get()
+            sender_name = sender_doc.to_dict()['name'] if sender_doc.exists else 'Unknown'
+            
+            reply_to_message = {
+                'message_text': reply_msg_data['message_text'],
+                'sender_name': sender_name,
+                'message_type': reply_msg_data['message_type']
+            }
+    
     # Create message with UTC timestamp
     message_doc = {
         "sender_id": current_user['id'],
@@ -1000,8 +867,10 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
         "starred_by": [],
         "forwarded": False,
         "reply_to_id": message_data.reply_to_id,
+        "reply_to_message": reply_to_message,
         "caption": message_data.caption,
-        "edited": False
+        "edited": False,
+        "reactions": []
     }
     
     doc_ref = db.collection('messages').add(message_doc)
@@ -1018,6 +887,7 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
         "message_type": message_data.message_type,
         "file_url": message_data.file_url,
         "caption": message_data.caption,
+        "reply_to_message": reply_to_message,
         "sender_name": current_user['name']
     }
     
@@ -1029,22 +899,53 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
 # Message reactions
 @app.post("/messages/{message_id}/react")
 async def react_to_message(message_id: str, reaction: MessageReaction, current_user = Depends(get_current_user)):
-    # Remove existing reaction from this user
-    reactions_query = db.collection('reactions').where('message_id', '==', message_id).where('user_id', '==', current_user['id'])
-    existing_reactions = reactions_query.stream()
-    for doc in existing_reactions:
-        doc.reference.delete()
-    
-    # Add new reaction
-    new_reaction = {
-        "message_id": message_id,
-        "user_id": current_user['id'],
-        "emoji": reaction.emoji,
-        "timestamp": firestore.SERVER_TIMESTAMP
-    }
-    db.collection('reactions').add(new_reaction)
-    
-    return {"message": "Reaction added"}
+    try:
+        # Get the message to update reactions
+        message_ref = db.collection('messages').document(message_id)
+        message_doc = message_ref.get()
+        
+        if not message_doc.exists:
+            raise HTTPException(status_code=404, detail="Message not found")
+        
+        message_data = message_doc.to_dict()
+        reactions = message_data.get('reactions', [])
+        
+        # Check if user already reacted with this emoji
+        existing_reaction_index = None
+        for i, r in enumerate(reactions):
+            if r.get('user_id') == current_user['id'] and r.get('emoji') == reaction.emoji:
+                existing_reaction_index = i
+                break
+        
+        if existing_reaction_index is not None:
+            # Remove existing reaction
+            reactions.pop(existing_reaction_index)
+        else:
+            # Add new reaction
+            reactions.append({
+                'user_id': current_user['id'],
+                'emoji': reaction.emoji,
+                'timestamp': firestore.SERVER_TIMESTAMP
+            })
+        
+        # Update message with new reactions
+        message_ref.update({'reactions': reactions})
+        
+        # Emit reaction update to both users
+        chat_participants = [message_data['sender_id'], message_data['receiver_id']]
+        for participant_id in chat_participants:
+            await sio.emit('message_reaction', {
+                'message_id': message_id,
+                'chat_id': message_data['receiver_id'] if message_data['sender_id'] == current_user['id'] else message_data['sender_id'],
+                'user_id': current_user['id'],
+                'emoji': reaction.emoji,
+                'reactions': reactions
+            }, room=f"user_{participant_id}")
+        
+        return {"message": "Reaction updated", "reactions": reactions}
+    except Exception as e:
+        print(f"Error in react_to_message: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update reaction")
 
 # Message editing
 @app.put("/messages/{message_id}")
@@ -1122,35 +1023,26 @@ async def get_statuses(current_user = Depends(get_current_user)):
 async def upload_file(file: UploadFile = File(...), current_user = Depends(get_current_user)):
     try:
         print(f"Upload request from user: {current_user['id']}")
-        print(f"File: {file.filename}, Content-Type: {file.content_type}, Size: {file.size if hasattr(file, 'size') else 'unknown'}")
+        print(f"File: {file.filename}, Content-Type: {file.content_type}")
         
-        # Validate file
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file provided")
         
-        # Read file content
         content = await file.read()
-        print(f"File content read: {len(content)} bytes")
-        
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="Empty file")
         
         # Generate unique filename
         timestamp = datetime.utcnow().timestamp()
         filename = f"{timestamp}_{file.filename}"
+        filepath = f"uploads/{filename}"
         
-        # Upload to user's Google Drive folder
-        print("Uploading to Google Drive...")
-        if not google_drive_service.service:
-            raise HTTPException(status_code=503, detail="Google Drive service not available")
+        # Save file locally
+        async with aiofiles.open(filepath, 'wb') as f:
+            await f.write(content)
         
-        # Get user's drive folder ID
-        folder_id = current_user.get('drive_folder_id')
-        
-        file_url = await google_drive_service.upload_file(
-            content, filename, file.content_type or 'application/octet-stream', folder_id
-        )
-        print(f"Google Drive upload successful: {file_url}")
+        # Return production file URL
+        file_url = f"https://widechat.onrender.com/uploads/{filename}"
         
         # Determine file type
         file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
@@ -1172,8 +1064,6 @@ async def upload_file(file: UploadFile = File(...), current_user = Depends(get_c
         raise
     except Exception as e:
         print(f"Upload error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 # Call routes
@@ -1671,14 +1561,6 @@ async def respond_to_chat_request(request_id: str, response_data: dict, current_
 async def delete_account(current_user = Depends(get_current_user)):
     """Delete user account"""
     try:
-        # Delete user's Google Drive folder
-        folder_id = current_user.get('drive_folder_id')
-        if folder_id:
-            try:
-                google_drive_service.delete_user_folder(folder_id)
-            except Exception as drive_error:
-                print(f"Failed to delete Drive folder: {drive_error}")
-        
         # Delete user from Firebase Auth
         auth.delete_user(current_user['id'])
         
