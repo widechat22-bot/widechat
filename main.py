@@ -749,6 +749,12 @@ async def update_profile(profile_data: dict, current_user = Depends(get_current_
     
     if update_data:
         user_ref.update(update_data)
+        
+        # Emit profile update to all connected users
+        await sio.emit('user_profile_updated', {
+            'user_id': current_user['id'],
+            'updates': update_data
+        })
     
     return {"message": "Profile updated successfully"}
 
