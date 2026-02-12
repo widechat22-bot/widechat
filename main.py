@@ -906,52 +906,79 @@ async def send_message(message_data: MessageSend, current_user = Depends(get_cur
 @app.post("/messages/{message_id}/react")
 async def react_to_message(message_id: str, reaction: MessageReaction, current_user = Depends(get_current_user)):
     try:
+        print(f"Reaction request: message_id={message_id}, emoji={reaction.emoji}, user_id={current_user['id']}")
+        
+        # Validate inputs
+        if not message_id or not reaction.emoji:
+            raise HTTPException(status_code=400, detail="Message ID and emoji are required")
+        
         # Get the message to update reactions
         message_ref = db.collection('messages').document(message_id)
         message_doc = message_ref.get()
         
         if not message_doc.exists:
+            print(f"Message not found: {message_id}")
             raise HTTPException(status_code=404, detail="Message not found")
         
         message_data = message_doc.to_dict()
+        print(f"Message data retrieved: sender={message_data.get('sender_id')}, receiver={message_data.get('receiver_id')}")
+        
+        # Ensure user is authorized to react to this message
+        if current_user['id'] not in [message_data.get('sender_id'), message_data.get('receiver_id')]:
+            raise HTTPException(status_code=403, detail="Not authorized to react to this message")
+        
         reactions = message_data.get('reactions', [])
+        print(f"Current reactions: {len(reactions)}")
+        
+        # Ensure reactions is a list
+        if not isinstance(reactions, list):
+            reactions = []
         
         # Check if user already reacted with this emoji
         existing_reaction_index = None
         for i, r in enumerate(reactions):
-            if r.get('user_id') == current_user['id'] and r.get('emoji') == reaction.emoji:
+            if isinstance(r, dict) and r.get('user_id') == current_user['id'] and r.get('emoji') == reaction.emoji:
                 existing_reaction_index = i
                 break
         
         if existing_reaction_index is not None:
             # Remove existing reaction
             reactions.pop(existing_reaction_index)
+            print(f"Removed existing reaction at index {existing_reaction_index}")
         else:
             # Add new reaction
-            reactions.append({
+            new_reaction = {
                 'user_id': current_user['id'],
                 'emoji': reaction.emoji,
-                'timestamp': firestore.SERVER_TIMESTAMP
-            })
+                'timestamp': datetime.utcnow()
+            }
+            reactions.append(new_reaction)
+            print(f"Added new reaction: {new_reaction}")
         
         # Update message with new reactions
         message_ref.update({'reactions': reactions})
+        print(f"Updated message reactions: {len(reactions)} total")
         
         # Emit reaction update to both users
-        chat_participants = [message_data['sender_id'], message_data['receiver_id']]
+        chat_participants = [message_data.get('sender_id'), message_data.get('receiver_id')]
         for participant_id in chat_participants:
-            await sio.emit('message_reaction', {
-                'message_id': message_id,
-                'chat_id': message_data['receiver_id'] if message_data['sender_id'] == current_user['id'] else message_data['sender_id'],
-                'user_id': current_user['id'],
-                'emoji': reaction.emoji,
-                'reactions': reactions
-            }, room=f"user_{participant_id}")
+            if participant_id:  # Ensure participant_id is not None
+                await sio.emit('message_reaction', {
+                    'message_id': message_id,
+                    'chat_id': message_data.get('receiver_id') if message_data.get('sender_id') == current_user['id'] else message_data.get('sender_id'),
+                    'user_id': current_user['id'],
+                    'emoji': reaction.emoji,
+                    'reactions': reactions
+                }, room=f"user_{participant_id}")
         
         return {"message": "Reaction updated", "reactions": reactions}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in react_to_message: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to update reaction")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update reaction: {str(e)}")
 
 # Message editing
 @app.put("/messages/{message_id}")
