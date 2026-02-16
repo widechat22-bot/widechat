@@ -1504,7 +1504,14 @@ async def delete_notification(notification_id: str, current_user = Depends(get_c
 
 
 
-# ==================== CHAT REQUESTS ====================
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse
+
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/call", response_class=HTMLResponse)
+async def call_page(request: Request):
+    return templates.TemplateResponse("call.html", {"request": request})
 @app.get("/chat-requests")
 async def get_chat_requests(current_user = Depends(get_current_user)):
     try:
