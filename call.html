@@ -34,50 +34,235 @@
         <button class="control-btn mute" id="muteBtn" onclick="toggleMute()">🎤</button>
         <button class="control-btn end" onclick="endCall()">📞</button>
         <button class="control-btn video" id="videoBtn" onclick="toggleVideo()" style="display: none;">📹</button>
+        <button class="control-btn" id="switchBtn" onclick="switchCamera()" style="display: none;">🔄</button>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
+    <script src="https://unpkg.com/simple-peer@9.11.1/simplepeer.min.js"></script>
     <script>
         const urlParams = new URLSearchParams(window.location.search);
+        const callId = urlParams.get('callId');
         const callType = urlParams.get('type');
+        const isIncoming = urlParams.get('incoming') === 'true';
+        const token = urlParams.get('token');
+        const contactName = urlParams.get('contactName') || 'Contact';
+
+        let socket;
+        let localStream;
+        let remoteStream;
+        let peer;
         let isMuted = false;
         let isVideoEnabled = callType === 'video';
+        let currentUserId = 'user1';
+        let targetUserId = 'user2';
 
-        function initInterface() {
-            if (callType === 'video') {
-                document.getElementById('remoteVideo').style.display = 'block';
-                document.getElementById('localVideo').style.display = 'block';
-                document.getElementById('videoBtn').style.display = 'inline-block';
-                document.getElementById('voiceInterface').style.display = 'none';
-            } else {
-                document.getElementById('voiceInterface').style.display = 'flex';
+        class WebRTCCall {
+            constructor() {
+                this.peer = null;
+                this.localStream = null;
+                this.remoteStream = null;
+            }
+
+            async initializeCall() {
+                try {
+                    this.initInterface();
+                    
+                    socket = io();
+                    socket.emit('join_room', { user_id: currentUserId });
+                    
+                    const constraints = {
+                        audio: true,
+                        video: isVideoEnabled ? {
+                            facingMode: 'user',
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        } : false
+                    };
+                    
+                    this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                    
+                    if (isVideoEnabled) {
+                        document.getElementById('localVideo').srcObject = this.localStream;
+                    }
+
+                    this.peer = new SimplePeer({
+                        initiator: !isIncoming,
+                        trickle: false,
+                        stream: this.localStream,
+                        config: {
+                            iceServers: [
+                                { urls: 'stun:stun.l.google.com:19302' },
+                                { urls: 'stun:stun1.l.google.com:19302' }
+                            ]
+                        }
+                    });
+
+                    this.setupPeerEvents();
+                    this.setupSocketEvents();
+
+                    this.updateStatus('Call in progress');
+
+                } catch (error) {
+                    console.error('Error initializing call:', error);
+                    this.updateStatus('Connection failed');
+                }
+            }
+
+            initInterface() {
+                document.getElementById('contactName').textContent = contactName;
+                
+                if (callType === 'video') {
+                    document.getElementById('remoteVideo').style.display = 'block';
+                    document.getElementById('localVideo').style.display = 'block';
+                    document.getElementById('videoBtn').style.display = 'inline-block';
+                    document.getElementById('switchBtn').style.display = 'inline-block';
+                    document.getElementById('voiceInterface').style.display = 'none';
+                } else {
+                    document.getElementById('voiceInterface').style.display = 'flex';
+                    document.getElementById('remoteVideo').style.display = 'none';
+                    document.getElementById('localVideo').style.display = 'none';
+                }
+            }
+
+            setupPeerEvents() {
+                this.peer.on('signal', (data) => {
+                    console.log('Sending WebRTC signal:', data.type);
+                    socket.emit('webrtc_signal', {
+                        target_user: targetUserId,
+                        signal: data,
+                        call_id: callId,
+                        from_user: currentUserId
+                    });
+                });
+
+                this.peer.on('stream', (stream) => {
+                    console.log('Received remote stream');
+                    this.remoteStream = stream;
+                    if (isVideoEnabled) {
+                        document.getElementById('remoteVideo').srcObject = stream;
+                    }
+                    this.updateStatus('Connected');
+                });
+
+                this.peer.on('connect', () => {
+                    console.log('WebRTC connection established');
+                });
+
+                this.peer.on('close', () => {
+                    console.log('WebRTC connection closed');
+                    this.cleanup();
+                });
+
+                this.peer.on('error', (error) => {
+                    console.error('WebRTC error:', error);
+                    this.updateStatus('Connection error');
+                });
+            }
+
+            setupSocketEvents() {
+                socket.on('webrtc_signal', (data) => {
+                    console.log('Received WebRTC signal:', data.signal.type);
+                    if (this.peer && !this.peer.destroyed) {
+                        this.peer.signal(data.signal);
+                    }
+                });
+
+                socket.on('call_ended', () => {
+                    this.endCall();
+                });
+            }
+
+            updateStatus(status) {
+                document.getElementById('status').textContent = status;
+                document.getElementById('callStatus').textContent = status;
+            }
+
+            toggleMute() {
+                if (this.localStream) {
+                    const audioTrack = this.localStream.getAudioTracks()[0];
+                    if (audioTrack) {
+                        audioTrack.enabled = !audioTrack.enabled;
+                        isMuted = !audioTrack.enabled;
+                        document.getElementById('muteBtn').classList.toggle('active', isMuted);
+                        document.getElementById('muteBtn').textContent = isMuted ? '🔇' : '🎤';
+                    }
+                }
+            }
+
+            toggleVideo() {
+                if (this.localStream && callType === 'video') {
+                    const videoTrack = this.localStream.getVideoTracks()[0];
+                    if (videoTrack) {
+                        videoTrack.enabled = !videoTrack.enabled;
+                        isVideoEnabled = videoTrack.enabled;
+                        document.getElementById('videoBtn').classList.toggle('active', !isVideoEnabled);
+                        document.getElementById('videoBtn').textContent = isVideoEnabled ? '📹' : '📷';
+                    }
+                }
+            }
+
+            async switchCamera() {
+                if (!isVideoEnabled || !this.localStream) return;
+                
+                try {
+                    const videoTrack = this.localStream.getVideoTracks()[0];
+                    const constraints = {
+                        audio: false,
+                        video: {
+                            facingMode: videoTrack.getSettings().facingMode === 'user' ? 'environment' : 'user'
+                        }
+                    };
+                    
+                    const newStream = await navigator.mediaDevices.getUserMedia(constraints);
+                    const newVideoTrack = newStream.getVideoTracks()[0];
+                    
+                    if (this.peer && !this.peer.destroyed) {
+                        const sender = this.peer._pc.getSenders().find(s => s.track && s.track.kind === 'video');
+                        if (sender) {
+                            await sender.replaceTrack(newVideoTrack);
+                        }
+                    }
+                    
+                    this.localStream.removeTrack(videoTrack);
+                    this.localStream.addTrack(newVideoTrack);
+                    videoTrack.stop();
+                    
+                    document.getElementById('localVideo').srcObject = this.localStream;
+                } catch (error) {
+                    console.error('Failed to switch camera:', error);
+                }
+            }
+
+            endCall() {
+                this.cleanup();
+                if (window.CallHandler) {
+                    window.CallHandler.postMessage('call_ended');
+                }
+                window.close();
+            }
+
+            cleanup() {
+                if (this.localStream) {
+                    this.localStream.getTracks().forEach(track => track.stop());
+                }
+                if (this.peer) {
+                    this.peer.destroy();
+                }
+                if (socket) {
+                    socket.emit('end_call', { call_id: callId });
+                    socket.disconnect();
+                }
             }
         }
 
-        function toggleMute() {
-            isMuted = !isMuted;
-            document.getElementById('muteBtn').classList.toggle('active', isMuted);
-            document.getElementById('muteBtn').textContent = isMuted ? '🔇' : '🎤';
-        }
+        const webrtcCall = new WebRTCCall();
 
-        function toggleVideo() {
-            if (callType === 'video') {
-                isVideoEnabled = !isVideoEnabled;
-                document.getElementById('videoBtn').classList.toggle('active', !isVideoEnabled);
-                document.getElementById('videoBtn').textContent = isVideoEnabled ? '📹' : '📷';
-            }
-        }
+        window.toggleMute = () => webrtcCall.toggleMute();
+        window.toggleVideo = () => webrtcCall.toggleVideo();
+        window.switchCamera = () => webrtcCall.switchCamera();
+        window.endCall = () => webrtcCall.endCall();
 
-        function endCall() {
-            if (window.CallHandler) {
-                window.CallHandler.postMessage('call_ended');
-            }
-            window.close();
-        }
-
-        initInterface();
-        document.getElementById('status').textContent = 'Call Ready';
-        document.getElementById('callStatus').textContent = 'Call Ready';
+        webrtcCall.initializeCall();
     </script>
 </body>
 </html>
