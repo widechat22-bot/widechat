@@ -42,10 +42,27 @@
     <script>
         const urlParams = new URLSearchParams(window.location.search);
         const callId = urlParams.get('callId');
-        const callType = urlParams.get('type');
+        const callType = urlParams.get('type') || 'voice';
         const isIncoming = urlParams.get('incoming') === 'true';
         const token = urlParams.get('token');
         const contactName = urlParams.get('contactName') || 'Contact';
+
+        // Validate required parameters
+        if (!callId) {
+            document.getElementById('status').textContent = 'Error: Call ID not found';
+            document.getElementById('callStatus').textContent = 'Error: Call ID not found';
+            console.error('Missing callId parameter');
+            return;
+        }
+
+        if (!token) {
+            document.getElementById('status').textContent = 'Error: Authentication token not found';
+            document.getElementById('callStatus').textContent = 'Error: Authentication token not found';
+            console.error('Missing token parameter');
+            return;
+        }
+
+        console.log('Call parameters:', { callId, callType, isIncoming, contactName });
 
         let socket;
         let localStream;
@@ -67,7 +84,22 @@
                 try {
                     this.initInterface();
                     
-                    socket = io();
+                    // Validate token and get user details
+                    if (!token) {
+                        throw new Error('Authentication token is required');
+                    }
+                    
+                    // Initialize socket with authentication
+                    socket = io({
+                        auth: {
+                            token: token
+                        }
+                    });
+                    
+                    // Get current user ID from token (simplified - in production, decode JWT)
+                    currentUserId = 'current_user'; // This should be extracted from token
+                    targetUserId = 'target_user'; // This should come from call data
+                    
                     socket.emit('join_room', { user_id: currentUserId });
                     
                     const constraints = {
@@ -83,6 +115,7 @@
                     
                     if (isVideoEnabled) {
                         document.getElementById('localVideo').srcObject = this.localStream;
+                        document.getElementById('localVideo').style.display = 'block';
                     }
 
                     this.peer = new SimplePeer({
@@ -104,7 +137,7 @@
 
                 } catch (error) {
                     console.error('Error initializing call:', error);
-                    this.updateStatus('Connection failed');
+                    this.updateStatus(`Connection failed: ${error.message}`);
                 }
             }
 
