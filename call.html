@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WideChat Call</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0B141B; color: white; font-family: Arial, sans-serif; overflow: hidden; }
+        #localVideo, #remoteVideo { width: 100%; height: 100vh; object-fit: cover; }
+        #localVideo { position: absolute; top: 20px; right: 20px; width: 120px; height: 160px; border-radius: 10px; z-index: 10; border: 2px solid #00A884; }
+        .controls { position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); display: flex; gap: 20px; z-index: 10; }
+        .control-btn { width: 60px; height: 60px; border-radius: 50%; border: none; color: white; font-size: 24px; cursor: pointer; background: rgba(255,255,255,0.2); }
+        .control-btn.active { background: #f44336; }
+        .end { background: #f44336; width: 70px; height: 70px; }
+        .status { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.5); padding: 8px 12px; border-radius: 20px; }
+        .voice-only { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+        .avatar { width: 150px; height: 150px; border-radius: 50%; background: #00A884; display: flex; align-items: center; justify-content: center; font-size: 60px; margin-bottom: 20px; }
+        .contact-name { font-size: 24px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="status" id="status">Connecting...</div>
+    <video id="remoteVideo" autoplay playsinline style="display: none;"></video>
+    <video id="localVideo" autoplay playsinline muted style="display: none;"></video>
+    
+    <div id="voiceInterface" class="voice-only" style="display: none;">
+        <div class="avatar">👤</div>
+        <div class="contact-name" id="contactName">Contact</div>
+        <div id="callStatus">Connecting...</div>
+    </div>
+    
+    <div class="controls">
+        <button class="control-btn mute" id="muteBtn" onclick="toggleMute()">🎤</button>
+        <button class="control-btn end" onclick="endCall()">📞</button>
+        <button class="control-btn video" id="videoBtn" onclick="toggleVideo()" style="display: none;">📹</button>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const callType = urlParams.get('type');
+        let isMuted = false;
+        let isVideoEnabled = callType === 'video';
+
+        function initInterface() {
+            if (callType === 'video') {
+                document.getElementById('remoteVideo').style.display = 'block';
+                document.getElementById('localVideo').style.display = 'block';
+                document.getElementById('videoBtn').style.display = 'inline-block';
+                document.getElementById('voiceInterface').style.display = 'none';
+            } else {
+                document.getElementById('voiceInterface').style.display = 'flex';
+            }
+        }
+
+        function toggleMute() {
+            isMuted = !isMuted;
+            document.getElementById('muteBtn').classList.toggle('active', isMuted);
+            document.getElementById('muteBtn').textContent = isMuted ? '🔇' : '🎤';
+        }
+
+        function toggleVideo() {
+            if (callType === 'video') {
+                isVideoEnabled = !isVideoEnabled;
+                document.getElementById('videoBtn').classList.toggle('active', !isVideoEnabled);
+                document.getElementById('videoBtn').textContent = isVideoEnabled ? '📹' : '📷';
+            }
+        }
+
+        function endCall() {
+            if (window.CallHandler) {
+                window.CallHandler.postMessage('call_ended');
+            }
+            window.close();
+        }
+
+        initInterface();
+        document.getElementById('status').textContent = 'Call Ready';
+        document.getElementById('callStatus').textContent = 'Call Ready';
+    </script>
+</body>
+</html>
