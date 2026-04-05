@@ -514,7 +514,18 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://widechatapp.web.app", "https://widechatmessage.web.app", "https://widechat.onrender.com", "https://widechat-q4g3.onrender.com", "http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "*"],
+    allow_origins=[
+        "https://widechatapp.web.app", 
+        "https://widechatmessage.web.app", 
+        "https://widechat.onrender.com", 
+        "https://widechat-q4g3.onrender.com", 
+        "http://localhost:5173", 
+        "http://localhost:3000", 
+        "http://127.0.0.1:5173", 
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1503,6 +1514,12 @@ async def delete_notification(notification_id: str, current_user = Depends(get_c
     raise HTTPException(status_code=404, detail="Notification not found")
 
 
+
+from fastapi.responses import FileResponse
+
+@app.get("/call")
+async def call_page():
+    return FileResponse("call.html", media_type="text/html")
 
 # ==================== CHAT REQUESTS ====================
 @app.get("/chat-requests")
